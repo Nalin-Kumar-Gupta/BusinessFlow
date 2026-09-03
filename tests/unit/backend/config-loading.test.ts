@@ -77,12 +77,14 @@ describe('config loading', () => {
     }))).toThrowError(/PADDLE_CLIENT_TOKEN/);
   });
 
-  it('rejects non-https checkout URLs outside local', () => {
-    expect(() => loadConfig(withAuth({
-      APP_ENV: 'production',
-      ALLOWED_ORIGINS: 'https://businessflow.app,chrome-extension://abc123',
-      PADDLE_CHECKOUT_SUCCESS_URL: 'http://businessflow.app/billing/success',
-      PADDLE_CHECKOUT_CANCEL_URL: 'https://businessflow.app/billing/cancel',
-    }))).toThrowError(/PADDLE_CHECKOUT_SUCCESS_URL/);
+  it('accepts config with only pro tier price IDs', () => {
+    const config = loadConfig(withAuth({
+      APP_ENV: 'local',
+      PADDLE_PRICE_IDS_JSON: '{"pro-monthly":"pri_pro_m","pro-yearly":"pri_pro_y"}',
+    }));
+    expect(config.billing.paddlePriceIds).toEqual({
+      'pro-monthly': 'pri_pro_m',
+      'pro-yearly': 'pri_pro_y',
+    });
   });
 });

@@ -43,12 +43,8 @@ const DEFAULT_LOCAL_ORIGINS = [
 ];
 
 const REQUIRED_PRICE_KEYS = [
-  'starter-monthly',
-  'starter-yearly',
   'pro-monthly',
   'pro-yearly',
-  'advanced-monthly',
-  'advanced-yearly',
 ] as const;
 
 function parseEnv(value: string | undefined): AppEnvironment {

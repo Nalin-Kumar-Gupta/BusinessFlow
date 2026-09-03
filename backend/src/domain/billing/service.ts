@@ -55,60 +55,70 @@ export class BillingService {
   ) {}
 
   getCatalog(detectedCountryCode: string | null): BillingCatalogResult {
+    const plans: BillingCatalogResult['plans'] = [];
+
+    if (this.options.priceMap['starter-monthly'] && this.options.priceMap['starter-yearly']) {
+      plans.push({
+        tier: 'starter',
+        productId: this.options.productMap['starter'] ?? null,
+        prices: {
+          monthly: {
+            planKey: 'starter-monthly',
+            priceId: this.options.priceMap['starter-monthly'] ?? '',
+            trialDays: 7,
+          },
+          yearly: {
+            planKey: 'starter-yearly',
+            priceId: this.options.priceMap['starter-yearly'] ?? '',
+            trialDays: 7,
+          },
+        },
+      });
+    }
+
+    if (this.options.priceMap['pro-monthly'] && this.options.priceMap['pro-yearly']) {
+      plans.push({
+        tier: 'pro',
+        productId: this.options.productMap['pro'] ?? null,
+        prices: {
+          monthly: {
+            planKey: 'pro-monthly',
+            priceId: this.options.priceMap['pro-monthly'] ?? '',
+            trialDays: 7,
+          },
+          yearly: {
+            planKey: 'pro-yearly',
+            priceId: this.options.priceMap['pro-yearly'] ?? '',
+            trialDays: 7,
+          },
+        },
+      });
+    }
+
+    if (this.options.priceMap['advanced-monthly'] && this.options.priceMap['advanced-yearly']) {
+      plans.push({
+        tier: 'advanced',
+        productId: this.options.productMap['advanced'] ?? null,
+        prices: {
+          monthly: {
+            planKey: 'advanced-monthly',
+            priceId: this.options.priceMap['advanced-monthly'] ?? '',
+            trialDays: 7,
+          },
+          yearly: {
+            planKey: 'advanced-yearly',
+            priceId: this.options.priceMap['advanced-yearly'] ?? '',
+            trialDays: 7,
+          },
+        },
+      });
+    }
+
     return {
       environment: this.options.paddleEnvironment,
       clientToken: this.options.paddleClientToken,
       detectedCountryCode,
-      plans: [
-        {
-          tier: 'starter',
-          productId: this.options.productMap['starter'] ?? null,
-          prices: {
-            monthly: {
-              planKey: 'starter-monthly',
-              priceId: this.options.priceMap['starter-monthly'] ?? '',
-              trialDays: 7,
-            },
-            yearly: {
-              planKey: 'starter-yearly',
-              priceId: this.options.priceMap['starter-yearly'] ?? '',
-              trialDays: 7,
-            },
-          },
-        },
-        {
-          tier: 'pro',
-          productId: this.options.productMap['pro'] ?? null,
-          prices: {
-            monthly: {
-              planKey: 'pro-monthly',
-              priceId: this.options.priceMap['pro-monthly'] ?? '',
-              trialDays: 7,
-            },
-            yearly: {
-              planKey: 'pro-yearly',
-              priceId: this.options.priceMap['pro-yearly'] ?? '',
-              trialDays: 7,
-            },
-          },
-        },
-        {
-          tier: 'advanced',
-          productId: this.options.productMap['advanced'] ?? null,
-          prices: {
-            monthly: {
-              planKey: 'advanced-monthly',
-              priceId: this.options.priceMap['advanced-monthly'] ?? '',
-              trialDays: 7,
-            },
-            yearly: {
-              planKey: 'advanced-yearly',
-              priceId: this.options.priceMap['advanced-yearly'] ?? '',
-              trialDays: 7,
-            },
-          },
-        },
-      ],
+      plans,
     };
   }
 

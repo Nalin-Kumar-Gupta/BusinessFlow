@@ -54,8 +54,13 @@ const PLAN_UI: PlanPresentation[] = [
 ];
 function toPriceMap(catalog: BillingCatalogPayload, billing: BillingInterval): Record<BillingTier, { planKey: string; priceId: string; trialDays: number }> {
   const output = {} as Record<BillingTier, { planKey: string; priceId: string; trialDays: number }>;
+function toPriceMap(catalog: BillingCatalogPayload, billing: BillingInterval): Partial<Record<BillingTier, { planKey: string; priceId: string; trialDays: number }>> {
+  const output: Partial<Record<BillingTier, { planKey: string; priceId: string; trialDays: number }>> = {};
   for (const plan of catalog.plans) {
     output[plan.tier] = plan.prices[billing];
+    if (plan.prices?.[billing]) {
+      output[plan.tier] = plan.prices[billing];
+    }
   }
   return output;
 }
@@ -167,6 +172,7 @@ export function PricingModal({
       const countryCode = catalog.detectedCountryCode;
       for (const plan of catalog.plans) {
         const selected = selectedPrices[plan.tier];
+        if (!selected?.priceId) continue;
         const response = await paddle.PricePreview({
           items: [{ priceId: selected.priceId, quantity: 1 }],
           ...(countryCode ? { address: { countryCode } } : {}),
@@ -552,6 +558,7 @@ export function PricingModal({
         </section>
         <div class="pricing-grid">
           {PLAN_UI.map((plan) => {
+          {PLAN_UI.filter((plan) => catalog?.plans.some((p) => p.tier === plan.tier)).map((plan) => {
             const selected = selectedPrices?.[plan.tier];
             const displayPrice = selected ? priceLabels[selected.planKey] : null;
             const isLoadingPrice = !displayPrice || loadingPrices || loadingCatalog;
