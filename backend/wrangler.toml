@@ -1,6 +1,8 @@
 name = "businessflow"
 main = "src/worker.ts"
 compatibility_date = "2026-09-02"
+workers_dev = true
+preview_urls = false
 
 [vars]
 APP_ENV = "local"
@@ -77,11 +79,8 @@ API_VERSION = "v1"
 LOG_LEVEL = "warn"
 ALLOWED_ORIGINS = "https://businessflow.app,chrome-extension://REPLACE_EXTENSION_ID"
 AUTH_PROVIDER = "supabase"
-SUPABASE_URL = "https://REPLACE_PROJECT_REF.supabase.co"
-SUPABASE_ANON_KEY = "REPLACE_SUPABASE_ANON_KEY"
-SUPABASE_PUBLISHABLE_KEY = "REPLACE_SUPABASE_PUBLISHABLE_KEY"
-SUPABASE_SECRET_KEY = "REPLACE_SUPABASE_SECRET_KEY"
-SUPABASE_JWKS_URL = "https://REPLACE_PROJECT_REF.supabase.co/auth/v1/.well-known/jwks.json"
+SUPABASE_URL = "https://ucznahltpotnkxsetlkf.supabase.co"
+SUPABASE_JWKS_URL = "https://ucznahltpotnkxsetlkf.supabase.co/auth/v1/.well-known/jwks.json"
 SESSION_COOKIE_NAME = "bf_session"
 SESSION_TTL_SECONDS = "2592000"
 SESSION_ENCRYPTION_KEY = "REPLACE_BASE64_32_BYTE_KEY"
