@@ -1,0 +1,28 @@
+# Local worker environment for `wrangler dev`
+APP_ENV=local
+API_VERSION=v1
+LOG_LEVEL=debug
+ALLOWED_ORIGINS=http://localhost:3000,http://localhost:5173,chrome-extension://<your-extension-id>
+AUTH_PROVIDER=supabase
+SUPABASE_URL=https://<your-project-ref>.supabase.co
+SUPABASE_ANON_KEY=<your-supabase-anon-key>
+SESSION_COOKIE_NAME=bf_session
+SESSION_TTL_SECONDS=2592000
+# 32-byte base64 key
+SESSION_ENCRYPTION_KEY=MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+
+# Paddle sandbox only (Phase 3)
+PADDLE_ENV=sandbox
+PADDLE_API_BASE_URL=https://sandbox-api.paddle.com
+PADDLE_API_KEY=<paddle-sandbox-api-key>
+PADDLE_CLIENT_TOKEN=test_<paddle-sandbox-client-token>
+PADDLE_WEBHOOK_SECRET=<paddle-sandbox-webhook-secret-from-notification-destination>
+PADDLE_PRICE_IDS_JSON={"starter-monthly":"pri_starter_monthly","starter-yearly":"pri_starter_yearly","pro-monthly":"pri_pro_monthly","pro-yearly":"pri_pro_yearly","advanced-monthly":"pri_advanced_monthly","advanced-yearly":"pri_advanced_yearly"}
+PADDLE_PRODUCT_IDS_JSON={"starter":"pro_starter","pro":"pro_pro","advanced":"pro_advanced"}
+PADDLE_CHECKOUT_SUCCESS_URL=http://localhost:3000/billing/success
+PADDLE_CHECKOUT_CANCEL_URL=http://localhost:3000/billing/cancel
+
+# Entitlement policy defaults
+ENTITLEMENT_REFRESH_INTERVAL_SECONDS=300
+ENTITLEMENT_CACHE_MAX_AGE_SECONDS=900
+ENTITLEMENT_OFFLINE_GRACE_SECONDS=900

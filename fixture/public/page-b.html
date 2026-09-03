@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>TestTrace Fixture — Page B</title>
+  <style>body { font-family: system-ui, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 16px; }</style>
+</head>
+<body>
+  <h1>Page B</h1>
+  <p>Fixture page for navigation testing.</p>
+  <a href="/">← Back to Home</a>
+  <a href="/page-a.html" style="margin-left:12px">Go to Page A</a>
+
+  <!-- SPA-style history push for testing SPA route changes -->
+  <button id="btn-spa" onclick="history.pushState({}, '', '/page-b.html?view=detail'); document.querySelector('#spa-label').textContent = 'URL pushed';">
+    Push history state (simulate SPA nav)
+  </button>
+  <p id="spa-label" style="font-size:13px;color:#555;"></p>
+</body>
+</html>

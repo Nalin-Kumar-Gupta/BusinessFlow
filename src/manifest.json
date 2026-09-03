@@ -1,0 +1,65 @@
+{
+  "manifest_version": 3,
+  "name": "BusinessFlow",
+  "version": "0.1.0",
+  "description": "Local-first QA evidence recorder with no automatic telemetry upload.",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "minimum_chrome_version": "116",
+  "background": {
+    "service_worker": "background/index.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "BusinessFlow — open panel",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "side_panel": {
+    "default_path": "ui/panel.html"
+  },
+  "options_page": "ui/options.html",
+  "commands": {
+    "capture-evidence": {
+      "suggested_key": {
+        "default": "Alt+Shift+C",
+        "mac": "Alt+Shift+C"
+      },
+      "description": "Capture evidence screenshot"
+    },
+    "toggle-pause": {
+      "suggested_key": {
+        "default": "Alt+Shift+P",
+        "mac": "Alt+Shift+P"
+      },
+      "description": "Pause / resume recording"
+    }
+  },
+  "permissions": [
+    "webRequest",
+    "webNavigation",
+    "scripting",
+    "storage",
+    "unlimitedStorage",
+    "activeTab",
+    "tabs",
+    "sidePanel"
+  ],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "incognito": "not_allowed",
+  "web_accessible_resources": [
+    {
+      "resources": ["content/isolated.js", "content/main-world.js", "content/indicator.css"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  }
+}

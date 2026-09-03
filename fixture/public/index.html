@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TestTrace Fixture — Home</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif; max-width: 720px;
+      margin: 40px auto; padding: 0 16px; line-height: 1.6;
+    }
+    h1 { font-size: 20px; }
+    section { margin-bottom: 28px; border: 1px solid #ddd; border-radius: 6px; padding: 16px; }
+    h2 { font-size: 14px; color: #666; margin: 0 0 12px; text-transform: uppercase; letter-spacing: .05em; }
+    button { padding: 8px 14px; margin: 4px; cursor: pointer; border-radius: 4px; border: 1px solid #aaa; }
+    a { color: #0066cc; margin-right: 12px; }
+    input { padding: 6px; border: 1px solid #ccc; border-radius: 4px; width: 200px; }
+    label { font-size: 13px; }
+  </style>
+</head>
+<body>
+  <h1>TestTrace — Fixture Application</h1>
+  <p>This page is used by Playwright e2e tests as a target web application.
+     It deliberately exercises the kinds of interactions TestTrace should observe.</p>
+
+  <!-- Navigation links — trigger NavigationEvent in the recorder -->
+  <section id="nav">
+    <h2>Navigation</h2>
+    <a href="/page-a.html" id="link-page-a">Go to Page A</a>
+    <a href="/page-b.html" id="link-page-b">Go to Page B</a>
+    <a href="https://example.com" id="link-external" target="_blank" rel="noopener">
+      External link (new tab)
+    </a>
+  </section>
+
+  <!-- Buttons — trigger UserClickEvent; label is aria-label or inner text -->
+  <section id="actions">
+    <h2>Actions</h2>
+    <button id="btn-save" aria-label="Save document">Save</button>
+    <button id="btn-delete" aria-label="Delete item">Delete</button>
+    <button id="btn-submit">Submit Form</button>
+    <button id="btn-cancel">Cancel</button>
+  </section>
+
+  <!-- Form — TestTrace must NEVER capture field values -->
+  <section id="form">
+    <h2>Form (values must not be captured)</h2>
+    <form id="login-form" onsubmit="return false">
+      <div>
+        <label for="username">Username</label><br />
+        <input type="text"     id="username" name="username" autocomplete="username" />
+      </div>
+      <div style="margin-top:8px">
+        <label for="password">Password</label><br />
+        <input type="password" id="password" name="password" autocomplete="current-password" />
+      </div>
+      <div style="margin-top:10px">
+        <button type="submit" id="btn-login">Log in</button>
+      </div>
+    </form>
+  </section>
+
+  <!-- XHR trigger — for network request observation -->
+  <section id="network">
+    <h2>Network</h2>
+    <button id="btn-fetch-ok"  onclick="doFetch('/api/ok')">Fetch /api/ok</button>
+    <button id="btn-fetch-404" onclick="doFetch('/api/not-found')">Fetch /api/404</button>
+    <button id="btn-fetch-500" onclick="doFetch('/api/error')">Fetch /api/500</button>
+    <pre id="fetch-result" style="font-size:12px;color:#555;min-height:20px"></pre>
+  </section>
+
+  <script>
+    async function doFetch(path) {
+      const el = document.getElementById('fetch-result');
+      try {
+        const r = await fetch(path);
+        el.textContent = r.status + ' ' + r.statusText;
+      } catch (e) {
+        el.textContent = 'Error: ' + e.message;
+      }
+    }
+  </script>
+</body>
+</html>

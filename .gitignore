@@ -1,0 +1,14 @@
+node_modules/
+dist/
+*.zip
+.DS_Store
+.env
+.env.*
+backend/.dev.vars
+test-results/
+playwright-report/
+coverage/
+
+# Phase-0 dense capture corpus — measurement instrument only, NEVER committed.
+poc/corpus/
+*.corpus.json

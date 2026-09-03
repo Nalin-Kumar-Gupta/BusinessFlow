@@ -1,0 +1,24 @@
+/* BusinessFlow in-page indicator host.
+   The visual indicator now renders inside shadow DOM (indicator.ts).
+   Keep host styling neutral so page CSS collisions don't create duplicate UI. */
+
+#__tt_indicator__ {
+  position: static !important;
+  inset: auto !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  background: transparent !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+}
+
+#__tt_indicator__.tt-hidden {
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
+
+/* Force-hide any stale capture button from older builds. */
+#__tt_capture_btn__ {
+  display: none !important;
+}

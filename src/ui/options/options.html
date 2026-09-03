@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>BusinessFlow · Settings</title>
+  <link rel="stylesheet" href="../shared/theme.css" />
+  <style>
+    .options-page {
+      max-width: 760px;
+      margin: 12px auto;
+    }
+
+    .options-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 8px;
+    }
+
+    .options-header h1 {
+      font-size: 22px;
+      margin: 0;
+      color: var(--fg-main);
+    }
+
+    .options-header p {
+      margin: 4px 0 0;
+      color: var(--fg-muted);
+    }
+
+    h2 {
+      margin: 0 0 12px;
+      font-size: 16px;
+      color: var(--fg-main);
+    }
+
+    .privacy-banner {
+      background: linear-gradient(180deg, #f8fbff, #f2f7ff);
+      border-color: #d7e3ff;
+      margin-bottom: 10px;
+      color: #1e3a8a;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    .privacy-note {
+      margin: 0;
+      color: var(--fg-muted);
+      line-height: 1.6;
+    }
+
+    .options-toggle-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: 10px 0 12px;
+      color: var(--fg-main);
+      font-size: 13px;
+      font-weight: 500;
+    }
+
+    .options-toggle-row input[type='checkbox'] {
+      width: 16px;
+      height: 16px;
+      margin: 0;
+      accent-color: var(--primary);
+      cursor: pointer;
+    }
+
+    .options-slider-row {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--bg-app);
+      margin-top: 4px;
+    }
+
+    .options-slider-row.is-disabled {
+      opacity: 0.58;
+    }
+
+    .options-slider-label {
+      margin: 0;
+      white-space: nowrap;
+    }
+
+    .options-slider {
+      width: 100%;
+      accent-color: var(--primary);
+      cursor: pointer;
+    }
+
+    .options-slider:disabled {
+      cursor: not-allowed;
+    }
+
+    .options-slider-value {
+      min-width: 42px;
+      text-align: right;
+      color: var(--fg-main);
+      font-size: 13px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .privacy-note code {
+      background: #eef2f7;
+      border: 1px solid var(--border);
+      padding: 1px 5px;
+      border-radius: 6px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 12px;
+      color: var(--fg-main);
+    }
+
+    .options-footer {
+      color: var(--fg-muted);
+      font-size: 12px;
+      text-align: center;
+      margin-top: 10px;
+    }
+
+    @media (max-width: 640px) {
+      .options-slider-row {
+        grid-template-columns: 1fr;
+        align-items: start;
+      }
+
+      .options-slider-label,
+      .options-slider-value {
+        text-align: left;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script src="options.js"></script>
+</body>
+</html>

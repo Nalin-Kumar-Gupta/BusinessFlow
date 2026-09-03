@@ -1,0 +1,34 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable", "WebWorker"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "exactOptionalPropertyTypes": false,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "allowJs": false,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "jsxImportSource": "preact",
+    // Note: "chrome" type removed because @types/chrome is blocked by the
+    // local npm registry. The ambient declarations in src/chrome.d.ts replace
+    // it. Restore "chrome" here and delete chrome.d.ts once the package
+    // becomes installable.
+    "types": ["node"]
+  },
+  "include": [
+    "src/**/*",
+    "backend/src/**/*",
+    "tests/**/*",
+    "build.mjs",
+    "playwright.config.ts"
+  ],
+  "exclude": ["node_modules", "dist"]
+}
