@@ -52,12 +52,9 @@ const PLAN_UI: PlanPresentation[] = [
     features: ['Everything in Pro', 'Enterprise governance controls', 'Dedicated onboarding'],
   },
 ];
-function toPriceMap(catalog: BillingCatalogPayload, billing: BillingInterval): Record<BillingTier, { planKey: string; priceId: string; trialDays: number }> {
-  const output = {} as Record<BillingTier, { planKey: string; priceId: string; trialDays: number }>;
 function toPriceMap(catalog: BillingCatalogPayload, billing: BillingInterval): Partial<Record<BillingTier, { planKey: string; priceId: string; trialDays: number }>> {
   const output: Partial<Record<BillingTier, { planKey: string; priceId: string; trialDays: number }>> = {};
   for (const plan of catalog.plans) {
-    output[plan.tier] = plan.prices[billing];
     if (plan.prices?.[billing]) {
       output[plan.tier] = plan.prices[billing];
     }
@@ -557,7 +554,6 @@ export function PricingModal({
           )}
         </section>
         <div class="pricing-grid">
-          {PLAN_UI.map((plan) => {
           {PLAN_UI.filter((plan) => catalog?.plans.some((p) => p.tier === plan.tier)).map((plan) => {
             const selected = selectedPrices?.[plan.tier];
             const displayPrice = selected ? priceLabels[selected.planKey] : null;
