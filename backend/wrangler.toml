@@ -68,6 +68,9 @@ database_name = "businessflow_staging"
 database_id = "REPLACE_WITH_STAGING_D1_DATABASE_ID"
 migrations_dir = "migrations"
 
+[env.production]
+name = "businessflow"
+
 [env.production.vars]
 APP_ENV = "production"
 API_VERSION = "v1"
