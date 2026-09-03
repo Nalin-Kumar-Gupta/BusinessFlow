@@ -8,6 +8,9 @@ export interface EnvBindings {
   AUTH_PROVIDER?: string;
   SUPABASE_URL?: string;
   SUPABASE_ANON_KEY?: string;
+  SUPABASE_PUBLISHABLE_KEY?: string;
+  SUPABASE_SECRET_KEY?: string;
+  SUPABASE_JWKS_URL?: string;
   SESSION_COOKIE_NAME?: string;
   SESSION_TTL_SECONDS?: string;
   SESSION_ENCRYPTION_KEY?: string;

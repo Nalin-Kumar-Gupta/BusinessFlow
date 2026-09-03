@@ -10,6 +10,9 @@ export interface AppConfig {
     provider: 'supabase';
     supabaseUrl: string;
     supabaseAnonKey: string;
+    supabasePublishableKey: string;
+    supabaseSecretKey: string;
+    supabaseJwksUrl: string;
     sessionCookieName: string;
     sessionTtlSeconds: number;
     sessionEncryptionKey: string;
@@ -246,6 +249,11 @@ export function loadConfig(envBindings: EnvBindings): AppConfig {
 
   const supabaseUrl = required('SUPABASE_URL', envBindings.SUPABASE_URL);
   const supabaseAnonKey = required('SUPABASE_ANON_KEY', envBindings.SUPABASE_ANON_KEY);
+  // SUPABASE_PUBLISHABLE_KEY is the new name for the anon/publishable key in @supabase/server.
+  // Falls back to SUPABASE_ANON_KEY for backward compatibility.
+  const supabasePublishableKey = envBindings.SUPABASE_PUBLISHABLE_KEY?.trim() || supabaseAnonKey;
+  const supabaseSecretKey = required('SUPABASE_SECRET_KEY', envBindings.SUPABASE_SECRET_KEY);
+  const supabaseJwksUrl = required('SUPABASE_JWKS_URL', envBindings.SUPABASE_JWKS_URL);
   const sessionEncryptionKey = required('SESSION_ENCRYPTION_KEY', envBindings.SESSION_ENCRYPTION_KEY);
 
   const paddleEnv = envBindings.PADDLE_ENV?.trim() || 'sandbox';
@@ -277,6 +285,9 @@ export function loadConfig(envBindings: EnvBindings): AppConfig {
       provider: 'supabase',
       supabaseUrl,
       supabaseAnonKey,
+      supabasePublishableKey,
+      supabaseSecretKey,
+      supabaseJwksUrl,
       sessionCookieName: envBindings.SESSION_COOKIE_NAME?.trim() || 'bf_session',
       sessionTtlSeconds: parsePositiveInt('SESSION_TTL_SECONDS', envBindings.SESSION_TTL_SECONDS, 60 * 60 * 24 * 30),
       sessionEncryptionKey,

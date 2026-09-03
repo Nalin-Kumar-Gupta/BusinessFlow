@@ -6,6 +6,10 @@ ALLOWED_ORIGINS=http://localhost:3000,http://localhost:5173,chrome-extension://<
 AUTH_PROVIDER=supabase
 SUPABASE_URL=https://<your-project-ref>.supabase.co
 SUPABASE_ANON_KEY=<your-supabase-anon-key>
+# New @supabase/server SDK keys (from Supabase API Keys settings)
+SUPABASE_PUBLISHABLE_KEY=<same as SUPABASE_ANON_KEY — your anon/publishable key>
+SUPABASE_SECRET_KEY=<your-supabase-service-role/secret-key>
+SUPABASE_JWKS_URL=https://<your-project-ref>.supabase.co/auth/v1/.well-known/jwks.json
 SESSION_COOKIE_NAME=bf_session
 SESSION_TTL_SECONDS=2592000
 # 32-byte base64 key
