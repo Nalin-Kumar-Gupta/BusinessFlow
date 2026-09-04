@@ -1079,13 +1079,6 @@ function StartForm({ origin, onStarted }: { origin: string; onStarted: () => voi
     setStarting(true);
     setError('');
 
-    const granted = await chrome.permissions.request({ origins: ['<all_urls>'] }).catch(() => false);
-    if (!granted) {
-      setStarting(false);
-      setError('Permission denied — BusinessFlow needs site access to capture evidence for this session.');
-      return;
-    }
-
     chrome.runtime.sendMessage({
       type: 'TT_SESSION_START',
       mode: 'guided' as const,

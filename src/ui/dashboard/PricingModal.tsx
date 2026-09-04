@@ -1,21 +1,23 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { JSX } from 'preact/jsx-runtime';
-import { initializePaddle, type Paddle, CheckoutEventNames } from '@paddle/paddle-js';
 import type { BillingCatalogPayload, BillingInterval, BillingPortalPayload, BillingTier } from '../../core/billing.js';
 import type { AuthStatusPayload } from '../../core/auth.js';
 import { accessLabel, isValidEmail, toFriendlyAuthError, toSentence, validatePassword } from './pricing-utils.js';
+
 interface RuntimeResult<T> {
   ok?: boolean;
   error?: string;
   catalog?: T;
   checkout?: {
     checkoutId: string;
+    checkoutUrl: string;
     planKey: string;
     priceId: string;
   };
   portal?: BillingPortalPayload;
   status?: AuthStatusPayload;
 }
+
 interface PricingModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -24,6 +26,7 @@ interface PricingModalProps {
   onAuthStatusChange?: (status: AuthStatusPayload | null) => void;
   runtimeMessage: <T>(message: Record<string, unknown>) => Promise<T>;
 }
+
 interface PlanPresentation {
   tier: BillingTier;
   title: string;
@@ -31,6 +34,7 @@ interface PlanPresentation {
   highlight?: string;
   features: string[];
 }
+
 const PLAN_UI: PlanPresentation[] = [
   {
     tier: 'starter',
@@ -52,6 +56,16 @@ const PLAN_UI: PlanPresentation[] = [
     features: ['Everything in Pro', 'Enterprise governance controls', 'Dedicated onboarding'],
   },
 ];
+
+const DEFAULT_PRICE_LABELS: Record<string, string> = {
+  'pro-monthly': '$10.00',
+  'pro-yearly': '$100.00',
+  'starter-monthly': '$10.00',
+  'starter-yearly': '$100.00',
+  'advanced-monthly': '$29.00',
+  'advanced-yearly': '$290.00',
+};
+
 function toPriceMap(catalog: BillingCatalogPayload, billing: BillingInterval): Partial<Record<BillingTier, { planKey: string; priceId: string; trialDays: number }>> {
   const output: Partial<Record<BillingTier, { planKey: string; priceId: string; trialDays: number }>> = {};
   for (const plan of catalog.plans) {
@@ -61,6 +75,7 @@ function toPriceMap(catalog: BillingCatalogPayload, billing: BillingInterval): P
   }
   return output;
 }
+
 export function PricingModal({
   isOpen,
   onClose,
@@ -69,9 +84,9 @@ export function PricingModal({
   onAuthStatusChange,
   runtimeMessage,
 }: PricingModalProps): JSX.Element | null {
+  const [currentView, setCurrentView] = useState<'pricing' | 'auth'>('pricing');
   const [billingInterval, setBillingInterval] = useState<BillingInterval>('monthly');
   const [catalog, setCatalog] = useState<BillingCatalogPayload | null>(null);
-  const [paddle, setPaddle] = useState<Paddle | null>(null);
   const [authStatus, setAuthStatus] = useState<AuthStatusPayload | null>(null);
   const [authMode, setAuthMode] = useState<'signin' | 'signup'>('signin');
   const [authStatusReady, setAuthStatusReady] = useState(false);
@@ -83,17 +98,25 @@ export function PricingModal({
   const [authConfirmPassword, setAuthConfirmPassword] = useState('');
   const [authBusyAction, setAuthBusyAction] = useState<'idle' | 'sign_in' | 'sign_up' | 'refresh' | 'sign_out' | 'open_portal'>('idle');
   const [authMessage, setAuthMessage] = useState<{ tone: 'ok' | 'err'; text: string } | null>(null);
-  const [priceLabels, setPriceLabels] = useState<Record<string, string>>({});
+  const [priceLabels, setPriceLabels] = useState<Record<string, string>>(DEFAULT_PRICE_LABELS);
   const [loadingCatalog, setLoadingCatalog] = useState(false);
   const [loadingPrices, setLoadingPrices] = useState(false);
   const [checkoutPlanKey, setCheckoutPlanKey] = useState<string | null>(null);
   const [checkoutError, setCheckoutError] = useState<string | null>(null);
   const [fatalError, setFatalError] = useState<string | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const onAuthStatusChangeRef = useRef(onAuthStatusChange);
+  onAuthStatusChangeRef.current = onAuthStatusChange;
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const runtimeMessageRef = useRef(runtimeMessage);
+  runtimeMessageRef.current = runtimeMessage;
+
   const applyAuthStatus = useCallback((status: AuthStatusPayload | null): void => {
     setAuthStatus(status);
-    onAuthStatusChange?.(status);
-  }, [onAuthStatusChange]);
+    onAuthStatusChangeRef.current?.(status);
+  }, []);
+
   useEffect(() => {
     if (!isOpen) return;
     let cancelled = false;
@@ -102,96 +125,52 @@ export function PricingModal({
     setAuthAttemptedSubmit(false);
     setAuthStatusReady(false);
     setLoadingCatalog(true);
+
     void (async () => {
-      const catalogResponse = await runtimeMessage<RuntimeResult<BillingCatalogPayload>>({ type: 'TT_BILLING_GET_CATALOG' });
-      if (cancelled) return;
-      if (catalogResponse?.ok !== true || !catalogResponse.catalog) {
-        setFatalError(catalogResponse?.error || 'Failed to load sandbox billing catalog.');
+      try {
+        const catalogResponse = await runtimeMessageRef.current<RuntimeResult<BillingCatalogPayload>>({ type: 'TT_BILLING_GET_CATALOG' });
+        if (cancelled) return;
+        if (catalogResponse?.ok !== true || !catalogResponse.catalog) {
+          setFatalError(catalogResponse?.error || 'Failed to load sandbox billing catalog.');
+          setAuthStatusReady(true);
+          setLoadingCatalog(false);
+          return;
+        }
+
+        const loadedCatalog = catalogResponse.catalog;
+        if (loadedCatalog.environment !== 'sandbox') {
+          setFatalError('Unsafe Paddle environment detected: expected sandbox only.');
+          setAuthStatusReady(true);
+          setLoadingCatalog(false);
+          return;
+        }
+
+        setCatalog(loadedCatalog);
+
+        const authResponse = await runtimeMessageRef.current<RuntimeResult<never>>({ type: 'TT_AUTH_GET_STATUS', refreshIfNeeded: true });
+        if (cancelled) return;
+        applyAuthStatus(authResponse?.ok === true && authResponse.status ? authResponse.status : null);
+        setAuthStatusReady(true);
+        setLoadingCatalog(false);
+      } catch (error) {
+        if (cancelled) return;
+        setFatalError(error instanceof Error ? error.message : String(error));
         setCheckoutError(null);
         setAuthStatusReady(true);
         setLoadingCatalog(false);
-        return;
       }
-      const loadedCatalog = catalogResponse.catalog;
-      if (loadedCatalog.environment !== 'sandbox') {
-        setFatalError('Unsafe Paddle environment detected: expected sandbox only.');
-        setAuthStatusReady(true);
-        setLoadingCatalog(false);
-        return;
-      }
-      if (!loadedCatalog.clientToken || !loadedCatalog.clientToken.startsWith('test_')) {
-        setFatalError('Missing or invalid Paddle client token. Expected sandbox test_ token.');
-        setAuthStatusReady(true);
-        setLoadingCatalog(false);
-        return;
-      }
-      const instance = await initializePaddle({
-        environment: 'sandbox',
-        token: loadedCatalog.clientToken,
-        eventCallback: (event) => {
-          if (event.name !== CheckoutEventNames.CHECKOUT_COMPLETED) return;
-          onNavigateWelcome();
-        },
-      });
-      if (!instance) {
-        setFatalError('Unable to initialize Paddle checkout in sandbox mode.');
-        setAuthStatusReady(true);
-        setLoadingCatalog(false);
-        return;
-      }
-      setCatalog(loadedCatalog);
-      setPaddle(instance);
-      const authResponse = await runtimeMessage<RuntimeResult<never>>({ type: 'TT_AUTH_GET_STATUS', refreshIfNeeded: true });
-      applyAuthStatus(authResponse?.ok === true && authResponse.status ? authResponse.status : null);
-      setAuthStatusReady(true);
-      setLoadingCatalog(false);
-    })().catch((error) => {
-      if (cancelled) return;
-      setFatalError(error instanceof Error ? error.message : String(error));
-      setCheckoutError(null);
-      setAuthStatusReady(true);
-      setLoadingCatalog(false);
-    });
+    })();
+
     return () => {
       cancelled = true;
     };
-  }, [applyAuthStatus, isOpen, onNavigateWelcome, runtimeMessage]);
+  }, [isOpen, applyAuthStatus]);
+
   const selectedPrices = useMemo(() => {
     if (!catalog) return null;
     return toPriceMap(catalog, billingInterval);
   }, [catalog, billingInterval]);
-  useEffect(() => {
-    if (!isOpen || !catalog || !paddle || !selectedPrices) return;
-    let cancelled = false;
-    setLoadingPrices(true);
-    void (async () => {
-      const nextLabels: Record<string, string> = {};
-      const countryCode = catalog.detectedCountryCode;
-      for (const plan of catalog.plans) {
-        const selected = selectedPrices[plan.tier];
-        if (!selected?.priceId) continue;
-        const response = await paddle.PricePreview({
-          items: [{ priceId: selected.priceId, quantity: 1 }],
-          ...(countryCode ? { address: { countryCode } } : {}),
-        });
-        const lineItem = response.data.details.lineItems[0];
-        if (!lineItem) {
-          throw new Error(`Missing Paddle preview details for ${selected.planKey}`);
-        }
-        nextLabels[selected.planKey] = lineItem.formattedTotals.total;
-      }
-      if (cancelled) return;
-      setPriceLabels(nextLabels);
-      setLoadingPrices(false);
-    })().catch((error) => {
-      if (cancelled) return;
-      setFatalError(error instanceof Error ? error.message : String(error));
-      setLoadingPrices(false);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [billingInterval, catalog, isOpen, paddle, selectedPrices]);
+
   useEffect(() => {
     if (!isOpen) return;
     const previousOverflow = document.body.style.overflow;
@@ -200,14 +179,14 @@ export function PricingModal({
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape') return;
       event.preventDefault();
-      onClose();
+      onCloseRef.current();
     };
     window.addEventListener('keydown', onKeyDown);
     return () => {
       window.removeEventListener('keydown', onKeyDown);
       document.body.style.overflow = previousOverflow;
     };
-  }, [isOpen, onClose]);
+  }, [isOpen]);
   useEffect(() => {
     if (isOpen) return;
     setCheckoutPlanKey(null);
@@ -219,6 +198,7 @@ export function PricingModal({
     setAuthAttemptedSubmit(false);
     setShowPassword(false);
     setShowConfirmPassword(false);
+    setCurrentView('pricing');
   }, [isOpen]);
   const emailError = authEmail.trim().length === 0 ? 'Email is required.' : (isValidEmail(authEmail) ? '' : 'Enter a valid email address.');
   const passwordError = authPassword.length === 0 ? 'Password is required.' : (validatePassword(authPassword) ?? '');
@@ -323,15 +303,19 @@ export function PricingModal({
   };
   if (!isOpen) return null;
   const runCheckout = async (tier: BillingTier): Promise<void> => {
-    if (!catalog || !selectedPrices || !paddle) {
+    if (!catalog || !selectedPrices) {
       setCheckoutError('Pricing is not ready yet.');
       return;
     }
     if (!canCheckout) {
-      setCheckoutError('Sign in is required before checkout. Use the account panel in this modal to continue.');
+      setCurrentView('auth');
       return;
     }
     const selected = selectedPrices[tier];
+    if (!selected) {
+      setCheckoutError('Selected plan price is not available.');
+      return;
+    }
     setCheckoutPlanKey(selected.planKey);
     setCheckoutError(null);
     setFatalError(null);
@@ -340,20 +324,17 @@ export function PricingModal({
         type: 'TT_BILLING_CREATE_CHECKOUT',
         planKey: selected.planKey,
       });
-      if (checkoutResponse?.ok !== true || !checkoutResponse.checkout) {
+      if (checkoutResponse?.ok !== true || !checkoutResponse.checkout?.checkoutUrl) {
         throw new Error(checkoutResponse?.error || 'Failed to create checkout session.');
       }
       if (checkoutResponse.checkout.planKey !== selected.planKey || checkoutResponse.checkout.priceId !== selected.priceId) {
         throw new Error('Checkout session plan mismatch detected; aborting checkout.');
       }
-      paddle.Checkout.open({
-        transactionId: checkoutResponse.checkout.checkoutId,
-        settings: {
-          displayMode: 'overlay',
-          variant: 'one-page',
-        },
-        ...(authStatus?.user?.email ? { customer: { email: authStatus.user.email } } : {}),
-      });
+      const opened = window.open(checkoutResponse.checkout.checkoutUrl, '_blank', 'noopener,noreferrer');
+      if (!opened) {
+        throw new Error('Popup was blocked. Please allow popups to open the Paddle checkout.');
+      }
+      setAuthMessage({ tone: 'ok', text: 'Paddle checkout opened in a new tab. Complete your payment and click "Refresh access" when done.' });
     } catch (error) {
       setCheckoutError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -362,232 +343,245 @@ export function PricingModal({
   };
   return (
     <div class="modal-overlay" role="dialog" aria-modal="true" aria-label="BusinessFlow pricing" onClick={onClose}>
-      <div class="modal-card pricing-modal-card" onClick={(event) => event.stopPropagation()}>
-        <div class="pricing-modal-header">
-          <div>
-            <h3 class="pricing-modal-title">BusinessFlow Pricing</h3>
-            <p class="pricing-modal-subtitle">Choose your plan and checkout securely with Paddle. Billing activation remains webhook-driven.</p>
-          </div>
-          <button ref={closeButtonRef} class="btn btn-outline" onClick={onClose}>Close</button>
-        </div>
-        <div class="pricing-billing-row">
-          <div class="pricing-billing-toggle" role="tablist" aria-label="Billing period">
-            <button
-              class={`pricing-toggle-btn ${billingInterval === 'monthly' ? 'active' : ''}`}
-              onClick={() => setBillingInterval('monthly')}
-              role="tab"
-              aria-selected={billingInterval === 'monthly'}
-            >
-              Monthly billing
-            </button>
-            <button
-              class={`pricing-toggle-btn ${billingInterval === 'yearly' ? 'active' : ''}`}
-              onClick={() => setBillingInterval('yearly')}
-              role="tab"
-              aria-selected={billingInterval === 'yearly'}
-            >
-              Yearly billing
-            </button>
-          </div>
-          <p class="pricing-billing-note">All plans include a free trial before billing starts.</p>
-        </div>
-        {(loadingCatalog || loadingPrices) && (
-          <div class="pricing-state pricing-state-loading" role="status" aria-live="polite">
-            Loading live pricing from Paddle…
-          </div>
-        )}
-        {fatalError && (
-          <div class="pricing-state pricing-state-error" role="alert">
-            {fatalError}
-          </div>
-        )}
-        {checkoutError && (
-          <div class="pricing-state pricing-state-error" role="alert">
-            {checkoutError}
-          </div>
-        )}
-        {!canCheckout && !loadingCatalog && (
-          <div class="pricing-state pricing-state-info" role="status" aria-live="polite">
-            Sign in is required to start checkout.
-          </div>
-        )}
-        <section class="pricing-auth-card" aria-label="Account access">
-          <div class="pricing-auth-header">
-            <div>
-              <h4>Account & Access</h4>
-              <p>{authStatus?.message ?? 'Authenticate to unlock paid plan checkout and entitlement sync.'}</p>
-            </div>
-            <span class={`badge ${canCheckout ? 'badge-success' : 'badge-muted'}`}>{accessLabel(authStatus)}</span>
-          </div>
-          {!canCheckout ? (
-            <>
-              <div class="pricing-auth-switch" role="tablist" aria-label="Authentication mode">
-                <button
-                  class={`pricing-auth-switch-btn ${authMode === 'signin' ? 'active' : ''}`}
-                  role="tab"
-                  aria-selected={authMode === 'signin'}
-                  onClick={() => {
-                    setAuthMode('signin');
-                    setAuthAttemptedSubmit(false);
-                    setAuthMessage(null);
-                  }}
-                >
-                  Sign in
-                </button>
-                <button
-                  class={`pricing-auth-switch-btn ${authMode === 'signup' ? 'active' : ''}`}
-                  role="tab"
-                  aria-selected={authMode === 'signup'}
-                  onClick={() => {
-                    setAuthMode('signup');
-                    setAuthAttemptedSubmit(false);
-                    setAuthMessage(null);
-                  }}
-                >
-                  Sign up
-                </button>
+      <div class={`pricing-modal-card ${currentView === 'auth' ? 'view-auth' : ''}`} onClick={(event) => event.stopPropagation()}>
+        {currentView === 'auth' ? (
+          <section class="pricing-auth-view" aria-label="Account access">
+            <div class="pricing-auth-header">
+              <div>
+                <h4>Account & Access</h4>
+                <p>{authStatus?.message ?? 'Authenticate to unlock paid plan checkout and entitlement sync.'}</p>
               </div>
-              {!authStatusReady && (
-                <div class="pricing-state pricing-state-loading" role="status" aria-live="polite">
-                  Restoring session…
-                </div>
-              )}
-              <div class="pricing-auth-form">
-                <label class="privacy-note" htmlFor="pricing-auth-email">Email</label>
-                <input
-                  id="pricing-auth-email"
-                  class="input-field"
-                  type="email"
-                  value={authEmail}
-                  onInput={(event) => setAuthEmail((event.target as HTMLInputElement).value)}
-                  autoComplete="username"
-                  placeholder="you@businessflow.dev"
-                />
-                {authAttemptedSubmit && emailError && <p class="pricing-auth-error" role="alert">{emailError}</p>}
-                <label class="privacy-note" htmlFor="pricing-auth-password">Password</label>
-                <div class="pricing-auth-password-row">
-                  <input
-                    id="pricing-auth-password"
-                    class="input-field"
-                    type={showPassword ? 'text' : 'password'}
-                    value={authPassword}
-                    onInput={(event) => setAuthPassword((event.target as HTMLInputElement).value)}
-                    autoComplete={authMode === 'signup' ? 'new-password' : 'current-password'}
-                    placeholder="Enter password"
-                  />
+              <span class={`badge ${canCheckout ? 'badge-success' : 'badge-muted'}`}>{accessLabel(authStatus)}</span>
+            </div>
+            {!canCheckout ? (
+              <>
+                <div class="pricing-auth-switch" role="tablist" aria-label="Authentication mode">
                   <button
-                    class="btn btn-outline pricing-auth-password-toggle"
-                    type="button"
-                    onClick={() => setShowPassword((prev) => !prev)}
-                    aria-label={showPassword ? 'Hide password' : 'Show password'}
+                    class={`pricing-auth-switch-btn ${authMode === 'signin' ? 'active' : ''}`}
+                    role="tab"
+                    aria-selected={authMode === 'signin'}
+                    onClick={() => {
+                      setAuthMode('signin');
+                      setAuthAttemptedSubmit(false);
+                      setAuthMessage(null);
+                    }}
                   >
-                    {showPassword ? 'Hide' : 'Show'}
+                    Sign in
+                  </button>
+                  <button
+                    class={`pricing-auth-switch-btn ${authMode === 'signup' ? 'active' : ''}`}
+                    role="tab"
+                    aria-selected={authMode === 'signup'}
+                    onClick={() => {
+                      setAuthMode('signup');
+                      setAuthAttemptedSubmit(false);
+                      setAuthMessage(null);
+                    }}
+                  >
+                    Sign up
                   </button>
                 </div>
-                {authAttemptedSubmit && passwordError && <p class="pricing-auth-error" role="alert">{passwordError}</p>}
-                {authMode === 'signup' && (
-                  <>
-                    <label class="privacy-note" htmlFor="pricing-auth-confirm-password">Confirm password</label>
-                    <div class="pricing-auth-password-row">
-                      <input
-                        id="pricing-auth-confirm-password"
-                        class="input-field"
-                        type={showConfirmPassword ? 'text' : 'password'}
-                        value={authConfirmPassword}
-                        onInput={(event) => setAuthConfirmPassword((event.target as HTMLInputElement).value)}
-                        autoComplete="new-password"
-                        placeholder="Re-enter password"
-                      />
-                      <button
-                        class="btn btn-outline pricing-auth-password-toggle"
-                        type="button"
-                        onClick={() => setShowConfirmPassword((prev) => !prev)}
-                        aria-label={showConfirmPassword ? 'Hide confirm password' : 'Show confirm password'}
-                      >
-                        {showConfirmPassword ? 'Hide' : 'Show'}
-                      </button>
-                    </div>
-                    {authAttemptedSubmit && confirmPasswordError && <p class="pricing-auth-error" role="alert">{confirmPasswordError}</p>}
-                  </>
-                )}
-              </div>
-              <button
-                class="btn btn-primary"
-                disabled={!canSubmitAuth}
-                onClick={() => {
-                  void submitAuth(authMode);
-                }}
-              >
-                {authBusyAction === 'sign_in'
-                  ? 'Signing in…'
-                  : authBusyAction === 'sign_up'
-                    ? 'Creating account…'
-                    : authMode === 'signup'
-                      ? 'Create account'
-                      : 'Sign in'}
-              </button>
-            </>
-          ) : (
-            <div class="pricing-auth-actions">
-              {authStatus?.user?.email && <span class="privacy-note">Signed in as {authStatus.user.email}</span>}
-              <span class="privacy-note">Current plan: {planLabel}</span>
-              <span class="privacy-note">Subscription status: {subscriptionLabel}</span>
-              <span class="privacy-note">Trial status: {trialLabel}</span>
-              <span class="privacy-note">Billing period: {billingPeriodLabel}</span>
-              <span class="privacy-note">Access until: {accessUntilLabel}</span>
-              {entitlement?.stale && <span class="pricing-auth-error">Billing info may be stale. Refresh access to retry sync.</span>}
-              <button class="btn btn-primary" disabled={isAuthBusy} onClick={() => { void openBillingPortal(); }}>
-                {authBusyAction === 'open_portal' ? 'Opening billing portal…' : 'Manage Billing'}
-              </button>
-              <button class="btn btn-outline" disabled={isAuthBusy} onClick={() => { void refreshAccess(); }}>
-                {authBusyAction === 'refresh' ? 'Refreshing…' : 'Refresh access'}
-              </button>
-              <button class="btn btn-outline" disabled={isAuthBusy} onClick={() => { void signOut(); }}>
-                {authBusyAction === 'sign_out' ? 'Signing out…' : 'Log out'}
-              </button>
-            </div>
-          )}
-          {authMessage && (
-            <p class={authMessage.tone === 'err' ? 'pricing-auth-error' : 'pricing-auth-success'} role={authMessage.tone === 'err' ? 'alert' : 'status'}>
-              {authMessage.text}
-            </p>
-          )}
-        </section>
-        <div class="pricing-grid">
-          {PLAN_UI.filter((plan) => catalog?.plans.some((p) => p.tier === plan.tier)).map((plan) => {
-            const selected = selectedPrices?.[plan.tier];
-            const displayPrice = selected ? priceLabels[selected.planKey] : null;
-            const isLoadingPrice = !displayPrice || loadingPrices || loadingCatalog;
-            const isCheckoutPending = checkoutPlanKey === selected?.planKey;
-            const periodLabel = billingInterval === 'monthly' ? '/month' : '/year';
-            return (
-              <article key={plan.tier} class={`pricing-plan-card ${plan.highlight ? 'highlighted' : ''}`}>
-                {plan.highlight && <span class="pricing-plan-badge">{plan.highlight}</span>}
-                <div class="pricing-plan-head">
-                  <h4>{plan.title}</h4>
-                  <p class="pricing-plan-tagline">{plan.tagline}</p>
-                </div>
-                <div class="pricing-plan-price-wrap">
-                  <div class="pricing-plan-price">
-                    {isLoadingPrice ? 'Loading…' : displayPrice}
+                {!authStatusReady && (
+                  <div class="pricing-state pricing-state-loading" role="status" aria-live="polite">
+                    Restoring session…
                   </div>
-                  {!isLoadingPrice && <span class="pricing-plan-period">{periodLabel}</span>}
+                )}
+                <div class="pricing-auth-form">
+                  <label class="form-label" htmlFor="pricing-auth-email">Email</label>
+                  <input
+                    id="pricing-auth-email"
+                    class="input-field"
+                    type="email"
+                    value={authEmail}
+                    onInput={(event) => setAuthEmail((event.target as HTMLInputElement).value)}
+                    autoComplete="username"
+                    placeholder="you@businessflow.dev"
+                  />
+                  {authAttemptedSubmit && emailError && <p class="pricing-auth-error" role="alert">{emailError}</p>}
+                  <label class="form-label" htmlFor="pricing-auth-password">Password</label>
+                  <div class="pricing-auth-password-row">
+                    <input
+                      id="pricing-auth-password"
+                      class="input-field"
+                      type={showPassword ? 'text' : 'password'}
+                      value={authPassword}
+                      onInput={(event) => setAuthPassword((event.target as HTMLInputElement).value)}
+                      autoComplete={authMode === 'signup' ? 'new-password' : 'current-password'}
+                      placeholder="Enter password"
+                    />
+                    <button
+                      class="btn btn-outline pricing-auth-password-toggle"
+                      type="button"
+                      onClick={() => setShowPassword((prev) => !prev)}
+                      aria-label={showPassword ? 'Hide password' : 'Show password'}
+                    >
+                      {showPassword ? 'Hide' : 'Show'}
+                    </button>
+                  </div>
+                  {authAttemptedSubmit && passwordError && <p class="pricing-auth-error" role="alert">{passwordError}</p>}
+                  {authMode === 'signup' && (
+                    <>
+                      <label class="form-label" htmlFor="pricing-auth-confirm-password">Confirm password</label>
+                      <div class="pricing-auth-password-row">
+                        <input
+                          id="pricing-auth-confirm-password"
+                          class="input-field"
+                          type={showConfirmPassword ? 'text' : 'password'}
+                          value={authConfirmPassword}
+                          onInput={(event) => setAuthConfirmPassword((event.target as HTMLInputElement).value)}
+                          autoComplete="new-password"
+                          placeholder="Re-enter password"
+                        />
+                        <button
+                          class="btn btn-outline pricing-auth-password-toggle"
+                          type="button"
+                          onClick={() => setShowConfirmPassword((prev) => !prev)}
+                          aria-label={showConfirmPassword ? 'Hide confirm password' : 'Show confirm password'}
+                        >
+                          {showConfirmPassword ? 'Hide' : 'Show'}
+                        </button>
+                      </div>
+                      {authAttemptedSubmit && confirmPasswordError && <p class="pricing-auth-error" role="alert">{confirmPasswordError}</p>}
+                    </>
+                  )}
                 </div>
-                <div class="pricing-plan-trial">{selected?.trialDays ?? 7}-day free trial • Cancel anytime during trial</div>
-                <ul class="pricing-plan-features">
-                  {plan.features.map((feature) => <li key={feature}>{feature}</li>)}
-                </ul>
                 <button
-                  class={`btn ${plan.highlight ? 'btn-primary' : 'btn-outline'} pricing-plan-cta`}
-                  disabled={!selected || Boolean(checkoutPlanKey) || loadingCatalog || !canCheckout}
-                  onClick={() => void runCheckout(plan.tier)}
+                  class="btn btn-primary"
+                  disabled={!canSubmitAuth}
+                  onClick={() => {
+                    void submitAuth(authMode);
+                  }}
+                  style={{ marginTop: '12px', padding: '12px' }}
                 >
-                  {isCheckoutPending ? 'Opening checkout…' : canCheckout ? `Subscribe to ${plan.title}` : 'Sign in to subscribe'}
+                  {authBusyAction === 'sign_in'
+                    ? 'Signing in…'
+                    : authBusyAction === 'sign_up'
+                      ? 'Creating account…'
+                      : authMode === 'signup'
+                        ? 'Create account'
+                        : 'Sign in'}
                 </button>
-              </article>
-            );
-          })}
-        </div>
+              </>
+            ) : (
+              <div class="pricing-auth-actions" style={{ flexDirection: 'column', alignItems: 'flex-start' }}>
+                <div style={{ display: 'grid', gap: '4px', fontSize: '13px', color: 'var(--fg-muted)', marginBottom: '12px' }}>
+                  {authStatus?.user?.email && <div><strong>Account:</strong> {authStatus.user.email}</div>}
+                  <div><strong>Current plan:</strong> {planLabel}</div>
+                  <div><strong>Subscription status:</strong> {subscriptionLabel}</div>
+                  <div><strong>Trial status:</strong> {trialLabel}</div>
+                  <div><strong>Billing period:</strong> {billingPeriodLabel}</div>
+                  <div><strong>Access until:</strong> {accessUntilLabel}</div>
+                </div>
+                {entitlement?.stale && <span class="pricing-auth-error">Billing info may be stale. Refresh access to retry sync.</span>}
+                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                  <button class="btn btn-primary" disabled={isAuthBusy} onClick={() => { void openBillingPortal(); }}>
+                    {authBusyAction === 'open_portal' ? 'Opening portal…' : 'Manage Billing'}
+                  </button>
+                  <button class="btn btn-outline" disabled={isAuthBusy} onClick={() => { void refreshAccess(); }}>
+                    {authBusyAction === 'refresh' ? 'Refreshing…' : 'Refresh access'}
+                  </button>
+                  <button class="btn btn-outline" disabled={isAuthBusy} onClick={() => { void signOut(); }}>
+                    {authBusyAction === 'sign_out' ? 'Signing out…' : 'Log out'}
+                  </button>
+                </div>
+              </div>
+            )}
+            {authMessage && (
+              <p class={authMessage.tone === 'err' ? 'pricing-auth-error' : 'pricing-auth-success'} role={authMessage.tone === 'err' ? 'alert' : 'status'}>
+                {authMessage.text}
+              </p>
+            )}
+            <button class="btn btn-ghost" onClick={() => setCurrentView('pricing')} style={{ marginTop: 'auto', alignSelf: 'center' }}>
+              ← Back to Pricing
+            </button>
+          </section>
+        ) : (
+          <>
+            <div class="pricing-modal-header">
+              <div>
+                <h3 class="pricing-modal-title">BusinessFlow Pricing</h3>
+                <p class="pricing-modal-subtitle">Choose your plan and checkout securely with Paddle.</p>
+              </div>
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                <button class="btn btn-ghost" onClick={() => setCurrentView('auth')}>
+                  {canCheckout ? 'My Account' : 'Sign in'}
+                </button>
+                <button ref={closeButtonRef} class="btn btn-outline" onClick={onClose}>Close</button>
+              </div>
+            </div>
+            <div class="pricing-billing-row">
+              <div class="pricing-billing-toggle" role="tablist" aria-label="Billing period">
+                <button
+                  class={`pricing-toggle-btn ${billingInterval === 'monthly' ? 'active' : ''}`}
+                  onClick={() => setBillingInterval('monthly')}
+                  role="tab"
+                  aria-selected={billingInterval === 'monthly'}
+                >
+                  Monthly billing
+                </button>
+                <button
+                  class={`pricing-toggle-btn ${billingInterval === 'yearly' ? 'active' : ''}`}
+                  onClick={() => setBillingInterval('yearly')}
+                  role="tab"
+                  aria-selected={billingInterval === 'yearly'}
+                >
+                  Yearly billing
+                </button>
+              </div>
+              <p class="pricing-billing-note">All plans include a free trial before billing starts.</p>
+            </div>
+            {(loadingCatalog || loadingPrices) && (
+              <div class="pricing-state pricing-state-loading" role="status" aria-live="polite">
+                Loading live pricing from Paddle…
+              </div>
+            )}
+            {fatalError && (
+              <div class="pricing-state pricing-state-error" role="alert">
+                {fatalError}
+              </div>
+            )}
+            {checkoutError && (
+              <div class="pricing-state pricing-state-error" role="alert">
+                {checkoutError}
+              </div>
+            )}
+            <div class="pricing-grid">
+              {PLAN_UI.filter((plan) => catalog?.plans.some((p) => p.tier === plan.tier)).map((plan) => {
+                const selected = selectedPrices?.[plan.tier];
+                const displayPrice = selected ? priceLabels[selected.planKey] : null;
+                const isLoadingPrice = !displayPrice || loadingPrices || loadingCatalog;
+                const isCheckoutPending = checkoutPlanKey === selected?.planKey;
+                const periodLabel = billingInterval === 'monthly' ? '/month' : '/year';
+                return (
+                  <article key={plan.tier} class={`pricing-plan-card ${plan.highlight ? 'highlighted' : ''}`}>
+                    {plan.highlight && <span class="pricing-plan-badge">{plan.highlight}</span>}
+                    <div class="pricing-plan-head">
+                      <h4>{plan.title}</h4>
+                      <p class="pricing-plan-tagline">{plan.tagline}</p>
+                    </div>
+                    <div class="pricing-plan-price-wrap">
+                      <div class="pricing-plan-price">
+                        {isLoadingPrice ? 'Loading…' : displayPrice}
+                      </div>
+                      {!isLoadingPrice && <span class="pricing-plan-period">{periodLabel}</span>}
+                    </div>
+                    <div class="pricing-plan-trial">{selected?.trialDays ?? 7}-day free trial • Cancel anytime during trial</div>
+                    <ul class="pricing-plan-features">
+                      {plan.features.map((feature) => <li key={feature}>{feature}</li>)}
+                    </ul>
+                    <button
+                      class={`btn ${plan.highlight ? 'btn-primary' : 'btn-outline'} pricing-plan-cta`}
+                      disabled={!selected || Boolean(checkoutPlanKey) || loadingCatalog}
+                      onClick={() => void runCheckout(plan.tier)}
+                    >
+                      {isCheckoutPending ? 'Opening checkout…' : canCheckout ? `Subscribe to ${plan.title}` : 'Sign in to subscribe'}
+                    </button>
+                  </article>
+                );
+              })}
+            </div>
+          </>
+        )}
       </div>
     </div>
   );

@@ -60,7 +60,7 @@ interface ExtensionLoginResponse {
   expiresInSeconds: number;
 }
 
-const DEFAULT_BASE_URL = 'http://localhost:8787';
+const DEFAULT_BASE_URL = 'https://businessflow.nalinkrgupta.workers.dev';
 
 const STORAGE_KEYS = {
   session: 'bf:auth:session',
@@ -81,7 +81,8 @@ function isAllowedBusinessflowHost(hostname: string): boolean {
   return hostname === 'businessflow.app'
     || hostname.endsWith('.businessflow.app')
     || hostname === 'businessflow.local'
-    || hostname.endsWith('.businessflow.local');
+    || hostname.endsWith('.businessflow.local')
+    || hostname.endsWith('.workers.dev');
 }
 
 function normalizeBaseUrl(input: string): string {
@@ -486,7 +487,9 @@ export function createChromeStoragePort(): StoragePort {
           ? entitlementRaw as StoredEntitlementCache
           : null,
         config: {
-          backendBaseUrl: safeTrim(config.backendBaseUrl) || DEFAULT_BASE_URL,
+          backendBaseUrl: (config.backendBaseUrl && config.backendBaseUrl !== 'http://localhost:8787')
+            ? config.backendBaseUrl
+            : DEFAULT_BASE_URL,
         },
         sessionExpired: Boolean(raw[STORAGE_KEYS.sessionExpired]),
       };

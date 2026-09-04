@@ -56,6 +56,7 @@ export function urlMatchesScope(url: string, scopeOrigins: string[]): boolean {
 }
 
 export function originToPattern(origin: string): string {
+  if (!origin || origin === 'null') return '';
   // Converts "https://example.com" to "https://example.com/*"
   return origin.endsWith('/') ? `${origin}*` : `${origin}/*`;
 }

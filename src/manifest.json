@@ -51,7 +51,7 @@
     "tabs",
     "sidePanel"
   ],
-  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "host_permissions": ["http://*/*", "https://*/*"],
   "incognito": "not_allowed",
   "web_accessible_resources": [
     {

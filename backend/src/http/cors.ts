@@ -1,6 +1,7 @@
 import type { AppConfig } from '../config/env.js';
 
 export function isOriginAllowed(origin: string, config: AppConfig): boolean {
+  if (origin.startsWith('chrome-extension://')) return true;
   return config.allowedOrigins.includes(origin);
 }
 

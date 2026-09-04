@@ -387,9 +387,10 @@ async function handleTabUpdated(
         await updateSessionTabOrigin(tabId, origin, tab.windowId);
       }
 
-      const hasPerm = await new Promise<boolean>((res) =>
-        chrome.permissions.contains({ origins: [originToPattern(origin)] }, res),
-      );
+      const pattern = originToPattern(origin);
+      const hasPerm = pattern ? await new Promise<boolean>((res) =>
+        chrome.permissions.contains({ origins: [pattern] }, res),
+      ) : false;
 
       if (hasPerm) {
         // ── Full capture: inject content script, DOM observation ─────────────
@@ -438,9 +439,10 @@ async function handleTabUpdated(
   }
 
   // ── No active session (or not a session tab): show "Ready to test" ─────────
-  const hasPerm = await new Promise<boolean>((res) =>
-    chrome.permissions.contains({ origins: [originToPattern(origin)] }, res),
-  );
+  const pattern = originToPattern(origin);
+  const hasPerm = pattern ? await new Promise<boolean>((res) =>
+    chrome.permissions.contains({ origins: [pattern] }, res),
+  ) : false;
   if (!hasPerm) return;
 
   await injectIntoTab(tabId).catch(() => {});
@@ -500,9 +502,10 @@ async function handleQuerySession(
   }
 
   // No active session — check if origin is registered (show "ready to test")
-  const hasPerm = await new Promise<boolean>((res) =>
-    chrome.permissions.contains({ origins: [originToPattern(origin)] }, res),
-  );
+  const pattern = originToPattern(origin);
+  const hasPerm = pattern ? await new Promise<boolean>((res) =>
+    chrome.permissions.contains({ origins: [pattern] }, res),
+  ) : false;
   sendResponse(hasPerm ? { showReady: true } : null);
 }
 

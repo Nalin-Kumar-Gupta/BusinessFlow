@@ -54,7 +54,7 @@ export function createApp(dependencies: AppDependencies = {}) {
 
         const authProvider = dependencies.createAuthProvider
           ? dependencies.createAuthProvider(config)
-          : new SupabaseAuthProvider(config.auth.supabaseUrl, config.auth.supabaseAnonKey);
+          : new SupabaseAuthProvider(config.auth.supabaseUrl, config.auth.supabasePublishableKey || config.auth.supabaseAnonKey);
 
         const authRepository = dependencies.createAuthRepository
           ? dependencies.createAuthRepository(env)

@@ -1,5 +1,5 @@
 import { createLocalJWKSet, jwtVerify } from 'jose';
-import { extractCredentials, resolveEnv, verifyCredentials } from '@supabase/server/core';
+
 import { ApiError } from '../errors/api-error.js';
 import type { AuthProvider, ProviderAuthResult, ProviderUserProfile } from './provider.js';
 
@@ -52,36 +52,6 @@ export async function verifySupabaseJwt(token: string, jwksUrl: string): Promise
   }
 }
 
-/**
- * Uses @supabase/server/core `verifyCredentials` to authenticate a request.
- * This integrates the official Supabase server SDK's auth flow for bearer token
- * verification, honouring Supabase publishable/secret key auth modes.
- *
- * On Cloudflare Workers, env vars must be passed explicitly via `env` overrides
- * because `process.env` is not available.
- *
- * @param request - The incoming Request object.
- * @param supabaseUrl - Supabase project URL.
- * @param supabasePublishableKey - The anon/publishable key.
- * @param supabaseSecretKey - The service-role/secret key.
- * @param jwksUrl - The project JWKS URL for JWT verification.
- */
-export async function verifySupabaseRequest(
-  request: Request,
-  supabaseUrl: string,
-  supabasePublishableKey: string,
-  supabaseSecretKey: string,
-  jwksUrl: string,
-): Promise<ReturnType<typeof verifyCredentials>> {
-  const credentials = extractCredentials(request);
-  const env = resolveEnv({
-    SUPABASE_URL: supabaseUrl,
-    SUPABASE_PUBLISHABLE_KEY: supabasePublishableKey,
-    SUPABASE_SECRET_KEY: supabaseSecretKey,
-    SUPABASE_JWKS_URL: jwksUrl,
-  });
-  return verifyCredentials(credentials, env);
-}
 
 
 interface SupabaseSessionPayload {
@@ -128,15 +98,24 @@ export class SupabaseAuthProvider implements AuthProvider {
 
     if (!response.ok) {
       const payload: SupabaseErrorPayload = await parseJson<SupabaseErrorPayload>(response).catch(() => ({} as SupabaseErrorPayload));
+      const message = payload.error_description || payload.msg || payload.message || 'Authentication provider request failed';
       throw new ApiError({
         code: response.status === 400 || response.status === 401 ? 'AUTH_INVALID_CREDENTIALS' : 'AUTH_PROVIDER_ERROR',
-        status: response.status === 400 || response.status === 401 ? 401 : 502,
-        message: payload.error_description || payload.msg || payload.message || 'Authentication provider request failed',
+        status: response.status === 400 || response.status === 401 ? 400 : 502,
+        message,
       });
     }
 
-    const payload = await parseJson<SupabaseSessionPayload>(response);
-    if (!payload.user?.id || !payload.access_token || !payload.refresh_token || !payload.expires_in) {
+    const payload = await parseJson<Record<string, any>>(response);
+    const userId = payload.user?.id || payload.id;
+    if (!payload.access_token || !payload.refresh_token) {
+      if (userId) {
+        throw new ApiError({
+          code: 'AUTH_EMAIL_CONFIRMATION_REQUIRED',
+          status: 400,
+          message: 'Account created! If email confirmation is enabled in Supabase, please verify your email before signing in, or disable "Confirm email" in your Supabase Auth settings.',
+        });
+      }
       throw new ApiError({
         code: 'AUTH_PROVIDER_INVALID_RESPONSE',
         status: 502,
@@ -145,11 +124,11 @@ export class SupabaseAuthProvider implements AuthProvider {
     }
 
     return {
-      providerUserId: payload.user.id,
-      email: payload.user.email ?? '',
+      providerUserId: userId,
+      email: payload.user?.email ?? payload.email ?? '',
       accessToken: payload.access_token,
       refreshToken: payload.refresh_token,
-      accessTokenExpiresInSec: payload.expires_in,
+      accessTokenExpiresInSec: payload.expires_in ?? 3600,
     };
   }
 

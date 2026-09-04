@@ -2506,6 +2506,16 @@ body {
   width: min(1080px, 96vw);
   max-height: 92vh;
   overflow: auto;
+  padding: 32px;
+  background: var(--bg-card);
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  display: flex;
+  flex-direction: column;
+}
+
+.pricing-modal-card.view-auth {
+  width: min(440px, 96vw);
 }
 
 .pricing-modal-header {
@@ -2513,18 +2523,21 @@ body {
   justify-content: space-between;
   align-items: flex-start;
   gap: 12px;
-  margin-bottom: 10px;
+  margin-bottom: 24px;
 }
 
 .pricing-modal-title {
   margin: 0;
-  font-size: 24px;
+  font-size: 28px;
   letter-spacing: -0.02em;
+  font-weight: 800;
+  color: #0f172a;
 }
 
 .pricing-modal-subtitle {
   margin: 6px 0 0;
   color: var(--fg-muted);
+  font-size: 15px;
   max-width: 620px;
 }
 
@@ -2534,20 +2547,21 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  margin-bottom: 14px;
+  margin-bottom: 24px;
 }
 
 .pricing-billing-note {
   margin: 0;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--fg-muted);
+  font-weight: 500;
 }
 
 .pricing-billing-toggle {
   display: inline-flex;
   gap: 6px;
-  background: var(--panel-2);
-  border: 1px solid var(--line);
+  background: var(--bg-app);
+  border: 1px solid var(--border);
   border-radius: 999px;
   padding: 4px;
 }
@@ -2555,38 +2569,48 @@ body {
 .pricing-toggle-btn {
   border: 0;
   border-radius: 999px;
-  padding: 8px 14px;
+  padding: 8px 16px;
   background: transparent;
   color: var(--fg-muted);
   cursor: pointer;
   font-weight: 600;
+  transition: all 0.2s;
+}
+
+.pricing-toggle-btn:hover:not(.active) {
+  color: var(--fg-main);
 }
 
 .pricing-toggle-btn.active {
-  background: var(--accent);
-  color: #fff;
+  background: var(--bg-card);
+  color: var(--primary);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
 }
 
 .pricing-state {
   border-radius: 12px;
-  padding: 10px 12px;
-  margin-bottom: 12px;
-  font-size: 13px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  font-size: 14px;
+  font-weight: 500;
 }
 
 .pricing-state-loading {
-  background: rgba(56, 189, 248, 0.12);
-  border: 1px solid rgba(56, 189, 248, 0.35);
+  background: rgba(56, 189, 248, 0.08);
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  color: #0369a1;
 }
 
 .pricing-state-error {
-  background: rgba(239, 68, 68, 0.12);
-  border: 1px solid rgba(239, 68, 68, 0.35);
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  color: #b91c1c;
 }
 
 .pricing-state-info {
-  background: rgba(37, 99, 235, 0.12);
-  border: 1px solid rgba(37, 99, 235, 0.35);
+  background: rgba(37, 99, 235, 0.08);
+  border: 1px solid rgba(37, 99, 235, 0.3);
+  color: #1d4ed8;
 }
 
 .badge-success {
@@ -2595,14 +2619,24 @@ body {
   border: 1px solid #86efac;
 }
 
+.pricing-auth-view {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  animation: fadeIn 0.3s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(5px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
 .pricing-auth-card {
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  padding: 14px;
-  margin-bottom: 14px;
-  display: grid;
-  gap: 12px;
-  background: color-mix(in oklab, var(--panel) 88%, white 12%);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 24px;
+  background: var(--bg-card);
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
 }
 
 .pricing-auth-header {
@@ -2610,46 +2644,57 @@ body {
   align-items: flex-start;
   justify-content: space-between;
   gap: 10px;
+  margin-bottom: 20px;
 }
 
 .pricing-auth-header h4 {
   margin: 0;
-  font-size: 16px;
+  font-size: 20px;
+  font-weight: 700;
 }
 
 .pricing-auth-header p {
-  margin: 4px 0 0;
+  margin: 6px 0 0;
   color: var(--fg-muted);
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .pricing-auth-switch {
   display: inline-flex;
-  width: fit-content;
+  width: 100%;
   gap: 6px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 4px;
+  background: var(--bg-app);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 6px;
+  margin-bottom: 20px;
 }
 
 .pricing-auth-switch-btn {
+  flex: 1;
   border: 0;
-  border-radius: 999px;
-  padding: 7px 13px;
+  border-radius: 8px;
+  padding: 8px 16px;
   background: transparent;
   color: var(--fg-muted);
   cursor: pointer;
   font-weight: 600;
+  transition: all 0.2s;
+}
+
+.pricing-auth-switch-btn:hover:not(.active) {
+  color: var(--fg-main);
 }
 
 .pricing-auth-switch-btn.active {
-  background: var(--accent);
-  color: #fff;
+  background: var(--bg-card);
+  color: var(--primary);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
 }
 
 .pricing-auth-form {
   display: grid;
-  gap: 8px;
+  gap: 12px;
 }
 
 .pricing-auth-password-row {
@@ -2696,7 +2741,7 @@ body {
 
 .pricing-plan-card {
   position: relative;
-  border: 1px solid var(--line);
+  border: 1px solid var(--border);
   border-radius: 18px;
   background: linear-gradient(180deg, rgba(255,255,255,0.05), rgba(255,255,255,0));
   padding: 18px;
@@ -2706,8 +2751,8 @@ body {
 }
 
 .pricing-plan-card.highlighted {
-  border-color: color-mix(in oklab, var(--accent) 62%, var(--line));
-  box-shadow: 0 10px 28px rgba(37, 99, 235, 0.15), 0 0 0 1px color-mix(in oklab, var(--accent) 30%, transparent);
+  border-color: color-mix(in oklab, var(--primary) 62%, var(--border));
+  box-shadow: 0 10px 28px rgba(37, 99, 235, 0.15), 0 0 0 1px color-mix(in oklab, var(--primary) 30%, transparent);
   transform: translateY(-2px);
 }
 
@@ -2716,7 +2761,7 @@ body {
   top: -10px;
   right: 14px;
   border-radius: 999px;
-  background: var(--accent);
+  background: var(--primary);
   color: #fff;
   padding: 5px 10px;
   font-size: 11px;
@@ -2765,7 +2810,7 @@ body {
 .pricing-plan-features {
   margin: 0;
   padding-left: 0;
-  color: var(--fg);
+  color: var(--fg-main);
   flex: 1;
   display: grid;
   gap: 8px;

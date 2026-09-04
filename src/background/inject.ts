@@ -18,14 +18,19 @@ function getRequestableOriginPatterns(origins: string[]): string[] {
   return [...out];
 }
 
-/** Inject isolated + main-world content scripts into all matching tabs. */
 export async function injectIntoMatchingTabs(scopeOrigins: string[]): Promise<void> {
   if (!scopeOrigins.length) return;
-  const patterns = getRequestableOriginPatterns(scopeOrigins);
+  const { extractOrigin } = await import('../core/url.js');
 
   let tabs: chrome.tabs.Tab[];
   try {
-    tabs = await chrome.tabs.query({ url: patterns });
+    tabs = await chrome.tabs.query({});
+    tabs = tabs.filter((t) => {
+      const u = t.url ?? '';
+      if (u.startsWith('chrome://') || u.startsWith('about:')) return false;
+      const origin = u.startsWith('http') ? extractOrigin(u) : u;
+      return scopeOrigins.includes(origin) || scopeOrigins.includes(extractOrigin(u));
+    });
   } catch {
     tabs = [];
   }
@@ -67,9 +72,17 @@ export async function injectIntoTab(tabId: number): Promise<void> {
 
 export async function deactivateInAllTabs(scopeOrigins: string[]): Promise<void> {
   if (!scopeOrigins.length) return;
-  const patterns = getRequestableOriginPatterns(scopeOrigins);
+  const { extractOrigin } = await import('../core/url.js');
   let tabs: chrome.tabs.Tab[];
-  try { tabs = await chrome.tabs.query({ url: patterns }); } catch { tabs = []; }
+  try {
+    const all = await chrome.tabs.query({});
+    tabs = all.filter(t => {
+      const u = t.url ?? '';
+      if (u.startsWith('chrome://') || u.startsWith('about:')) return false;
+      const origin = u.startsWith('http') ? extractOrigin(u) : u;
+      return scopeOrigins.includes(origin) || scopeOrigins.includes(extractOrigin(u));
+    });
+  } catch { tabs = []; }
 
   for (const tab of tabs) {
     if (!tab.id) continue;
