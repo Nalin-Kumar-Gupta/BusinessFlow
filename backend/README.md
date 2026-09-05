@@ -40,6 +40,7 @@ npx wrangler dev
 - `POST /api/v1/auth/signup`
 - `POST /api/v1/auth/login`
 - `POST /api/v1/auth/logout`
+- `POST /api/v1/auth/forgot-password`
 - `GET /api/v1/auth/me`
 - `POST /api/v1/auth/extension/login`
 - `POST /api/v1/auth/extension/logout`

@@ -138,6 +138,14 @@ export function resetTabApiShotBudget(tabId: number): void {
   tabApiShotCount.set(tabId, 0);
 }
 
+export function getInFlightRequestCount(tabId: number): number {
+  let count = 0;
+  for (const pending of pendingRequests.values()) {
+    if (pending.tabId === tabId) count += 1;
+  }
+  return count;
+}
+
 // ─── Handlers ─────────────────────────────────────────────────────────────────
 
 async function getSessionIfActive(url: string, tabId: number): Promise<{ sessionId: string; scopeOrigins: string[] } | null> {

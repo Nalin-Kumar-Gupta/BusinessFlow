@@ -2,7 +2,7 @@ import type { AuthContext } from '../../../types.js';
 import type { AuthService } from '../../../domain/auth/service.js';
 import { jsonSuccess } from '../../../http/response.js';
 import { parseJsonBody } from '../../../validation/json.js';
-import { validateCredentialRequest } from '../../../validation/auth.js';
+import { validateCredentialRequest, validateEmailRequest } from '../../../validation/auth.js';
 import { serializeCookie } from '../../../http/cookies.js';
 import { enforceRateLimit } from '../../../http/rate-limit.js';
 import type { AppConfig } from '../../../config/env.js';
@@ -125,4 +125,25 @@ export async function extensionLogout(
 ): Promise<Response> {
   await service.logout(auth);
   return jsonSuccess({ loggedOut: true }, requestId, 200);
+}
+
+export async function forgotPassword(
+  request: Request,
+  service: AuthService,
+  requestId: string,
+): Promise<Response> {
+  enforceRateLimit(request, {
+    bucket: 'auth-forgot-password',
+    limit: 10,
+    windowMs: 5 * 60 * 1000,
+  });
+
+  const body = await parseJsonBody(request);
+  const payload = validateEmailRequest(body);
+  await service.requestPasswordReset(payload.email);
+
+  return jsonSuccess({
+    accepted: true,
+    message: 'If that email exists, a reset link has been sent.',
+  }, requestId, 200);
 }

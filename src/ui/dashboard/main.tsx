@@ -1,7 +1,7 @@
 import { render } from 'preact';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { JSX } from 'preact/jsx-runtime';
-import type { EvidenceStoredEvent, NetworkLog, Session, SessionStatus, Step, StepBug, StepNote, StepPin } from '../../core/types.js';
+import type { EvidenceStoredEvent, NetworkLog, Session, SessionStatus, Step, StepBug, StepNote, StepPin, TestEvent } from '../../core/types.js';
 import type { AuthStatusPayload } from '../../core/auth.js';
 import { normalizeStepBugs, normalizeStepNotes, stepLabel } from '../../core/step-helpers.js';
 import { sanitizeDownloadFilename, sanitizeFilenameSegment } from '../../core/security.js';
@@ -14,7 +14,9 @@ import {
 import { Modal } from './Modal.js';
 import { ExportModal } from './ExportModal.js';
 import { PricingModal } from './PricingModal.js';
-import type { ExportModalContext } from './ExportModal.js';
+import { AccountModal } from './AccountModal.js';
+import { PlanGate } from './PlanGate.js';
+import { deriveAccessContext } from './access-control.js';
 import { AnnotatableScreenshot } from './AnnotatableScreenshot.js';
 import type { PinKind, ScreenshotHighlightRect, ScreenshotPin } from './AnnotatableScreenshot.js';
 import { buildBflowArchive, importBflowArchiveAtomic } from '../export/bflow/archive.js';
@@ -24,11 +26,19 @@ import {
   exportEligibilityIssue,
   isExportModalContextValid,
   type ExportFormat,
+  type ExportModalContext,
   type ExportPreflightSummary,
   type SessionSelectionMode,
 } from './export-ux.js';
 import { getNextMenuIndex, isKeyboardActivationKey } from '../shared/a11y.js';
 import { copyFeatureEvidence, copySessionEvidence } from '../export/clipboard/copy-evidence.js';
+import {
+  buildDiagnosticIssues,
+  inferRootCauseSummary,
+  type ConsoleDiagnosticEvent,
+  type DevTracePane,
+  type DiagnosticIssue,
+} from './devtrace-analysis.js';
 
 interface WorkspaceStep {
   step: Step;
@@ -61,9 +71,34 @@ interface TraceConsoleRow {
   pageUrl?: string;
 }
 
-type TraceTimelineRow = TraceStepRow | TraceLogRow | TraceConsoleRow;
+interface WorkspaceSignalEvent {
+  id: string;
+  ts: number;
+  level: 'critical' | 'warning' | 'info';
+  source: string;
+  message: string;
+  pageUrl?: string;
+}
 
-type InspectorTab = 'headers' | 'payload' | 'response';
+interface TraceSignalRow {
+  type: 'signal';
+  id: string;
+  ts: number;
+  signal: WorkspaceSignalEvent;
+}
+
+interface TraceNetPhaseRow {
+  type: 'net-phase';
+  id: string;
+  ts: number;
+  event: Extract<TestEvent, { kind: 'net_phase' }>;
+}
+
+type TraceTimelineRow = TraceStepRow | TraceSignalRow | TraceNetPhaseRow | TraceLogRow | TraceConsoleRow;
+
+type InspectorTab = 'summary' | 'headers' | 'payload' | 'response' | 'timing' | 'correlation';
+type NetworkTypeFilter = 'all' | 'fetch-xhr' | 'websocket' | 'sse' | 'document' | 'script' | 'stylesheet' | 'image' | 'font' | 'other';
+type NetworkStatusFilter = 'all' | 'success' | 'warning' | 'critical';
 type WorkspaceViewTab = 'qa' | 'dev';
 type FeatureTab = 'Test Cases' | 'Bug Tracker';
 type DashboardRouteView = 'dashboard' | 'welcome' | 'pricing';
@@ -118,6 +153,7 @@ interface ModalConfig {
   inputPlaceholder?: string;
   inputValue?: string;
   isDanger?: boolean;
+  confirmLabel?: string;
   onConfirm: (value: string) => void | Promise<void>;
 }
 
@@ -317,6 +353,75 @@ function pathnameForUrl(url: string): string {
   }
 }
 
+function buildDiagnosticSignals(events: readonly TestEvent[]): WorkspaceSignalEvent[] {
+  const signals: WorkspaceSignalEvent[] = [];
+
+  for (const event of events) {
+    switch (event.kind) {
+      case 'page_error':
+        signals.push({
+          id: event.id,
+          ts: event.ts,
+          level: 'critical',
+          source: 'PAGE',
+          message: `${event.type}: ${event.message}`,
+          pageUrl: event.pageUrl,
+        });
+        break;
+      case 'navigation':
+        signals.push({
+          id: event.id,
+          ts: event.ts,
+          level: 'info',
+          source: 'NAV',
+          message: event.url,
+          pageUrl: event.url,
+        });
+        break;
+      case 'web_vital': {
+        const level = event.rating === 'poor'
+          ? 'critical'
+          : event.rating === 'needs-improvement'
+            ? 'warning'
+            : 'info';
+        signals.push({
+          id: event.id,
+          ts: event.ts,
+          level,
+          source: 'VITAL',
+          message: `${event.name}: ${Math.round(event.value * 10) / 10} (${event.rating})`,
+          pageUrl: event.pageUrl,
+        });
+        break;
+      }
+      case 'long_task':
+        signals.push({
+          id: event.id,
+          ts: event.ts,
+          level: event.duration >= 200 ? 'warning' : 'info',
+          source: 'LONG TASK',
+          message: `${Math.round(event.duration)}ms`,
+          pageUrl: event.pageUrl,
+        });
+        break;
+      case 'csp_violation':
+        signals.push({
+          id: event.id,
+          ts: event.ts,
+          level: 'warning',
+          source: 'CSP',
+          message: `${event.violatedDirective} blocked ${event.blockedURI || 'resource'}`,
+          pageUrl: event.pageUrl,
+        });
+        break;
+      default:
+        break;
+    }
+  }
+
+  return signals.sort((a, b) => a.ts - b.ts);
+}
+
 function runtimeMessage<T>(message: Record<string, unknown>): Promise<T> {
   return new Promise((resolve) => {
     chrome.runtime.sendMessage(message, (response: unknown) => resolve(response as T));
@@ -369,6 +474,34 @@ function networkStatusClass(status: number): 'success' | 'warning' | 'critical' 
   if (status >= 500 || status === 0) return 'critical';
   if (status >= 400) return 'warning';
   return 'success';
+}
+
+function normalizeResourceType(raw: string | undefined): string {
+  const value = (raw ?? '').toLowerCase();
+  if (!value) return 'other';
+  if (value === 'xmlhttprequest' || value === 'fetch') return 'fetch-xhr';
+  if (value === 'websocket') return 'websocket';
+  if (value === 'eventsource') return 'sse';
+  if (value === 'main_frame' || value === 'sub_frame' || value === 'document') return 'document';
+  if (value === 'script') return 'script';
+  if (value === 'stylesheet') return 'stylesheet';
+  if (value === 'image') return 'image';
+  if (value === 'font') return 'font';
+  return 'other';
+}
+
+function resourceTypeLabel(type: string): string {
+  switch (type) {
+    case 'fetch-xhr': return 'Fetch/XHR';
+    case 'websocket': return 'WebSocket';
+    case 'sse': return 'EventSource';
+    case 'document': return 'Document';
+    case 'script': return 'Script';
+    case 'stylesheet': return 'Stylesheet';
+    case 'image': return 'Image';
+    case 'font': return 'Font';
+    default: return 'Other';
+  }
 }
 
 async function mapWithConcurrency<T, R>(
@@ -469,13 +602,7 @@ function buildDashboardUrl(view: DashboardRouteView): string {
 }
 
 
-interface WorkspaceConsoleEvent {
-  id: string;
-  ts: number;
-  level: 'error' | 'warn';
-  message: string;
-  pageUrl?: string;
-}
+type WorkspaceConsoleEvent = ConsoleDiagnosticEvent;
 
 function DashboardApp(): JSX.Element {
   const [featureSummaries, setFeatureSummaries] = useState<FeatureSummary[]>([]);
@@ -496,10 +623,18 @@ function DashboardApp(): JSX.Element {
   const [workspaceSteps, setWorkspaceSteps] = useState<WorkspaceStep[]>([]);
   const [workspaceNetworkLogs, setWorkspaceNetworkLogs] = useState<NetworkLog[]>([]);
   const [workspaceConsoleEvents, setWorkspaceConsoleEvents] = useState<WorkspaceConsoleEvent[]>([]);
+  const [workspaceSignalEvents, setWorkspaceSignalEvents] = useState<WorkspaceSignalEvent[]>([]);
+  const [workspaceRawEvents, setWorkspaceRawEvents] = useState<TestEvent[]>([]);
+  const [devTracePane, setDevTracePane] = useState<DevTracePane>('network');
   const [devtoolsFilter, setDevtoolsFilter] = useState('');
+  const [networkTypeFilter, setNetworkTypeFilter] = useState<NetworkTypeFilter>('all');
+  const [networkStatusFilter, setNetworkStatusFilter] = useState<NetworkStatusFilter>('all');
+  const [networkMethodFilter, setNetworkMethodFilter] = useState<string>('all');
+  const [networkBodyOnly, setNetworkBodyOnly] = useState(false);
+  const [consoleLevelFilter, setConsoleLevelFilter] = useState<'all' | 'error' | 'warn'>('all');
   const [viewTab, setViewTab] = useState<WorkspaceViewTab>('qa');
   const [selectedLogId, setSelectedLogId] = useState<string | null>(null);
-  const [inspectorTab, setInspectorTab] = useState<InspectorTab>('headers');
+  const [inspectorTab, setInspectorTab] = useState<InspectorTab>('summary');
   const [copyFeedback, setCopyFeedback] = useState(false);
   const [activeTab, setActiveTab] = useState<FeatureTab>('Test Cases');
   const [bugTrackerRows, setBugTrackerRows] = useState<BugTrackerRow[]>([]);
@@ -527,6 +662,8 @@ function DashboardApp(): JSX.Element {
   const [toasts, setToasts] = useState<UiToast[]>([]);
   const [authStatus, setAuthStatus] = useState<AuthStatusPayload | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const [isAccountModalOpen, setIsAccountModalOpen] = useState(false);
+  const accessContext = useMemo(() => deriveAccessContext(authStatus), [authStatus]);
 
   const [routingApplied, setRoutingApplied] = useState(false);
   const blobUrlsRef = useRef<string[]>([]);
@@ -569,8 +706,14 @@ function DashboardApp(): JSX.Element {
     setRouteView(nextView);
   };
 
-  const openPricing = (): void => {
+  const openPricing = (event?: Event): void => {
+    event?.preventDefault();
+    event?.stopPropagation();
     navigateToView('pricing');
+  };
+
+  const openAccount = (): void => {
+    setIsAccountModalOpen(true);
   };
 
   const closePricing = (): void => {
@@ -613,6 +756,20 @@ function DashboardApp(): JSX.Element {
     window.addEventListener('popstate', syncRouteFromBrowser);
     return () => window.removeEventListener('popstate', syncRouteFromBrowser);
   }, []);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('modal') !== 'account') return;
+    setIsAccountModalOpen(true);
+    params.delete('modal');
+    const nextUrl = `${window.location.pathname}${params.toString() ? `?${params.toString()}` : ''}${window.location.hash}`;
+    window.history.replaceState({}, '', nextUrl);
+  }, []);
+
+  const openPricingFromAccount = (): void => {
+    setIsAccountModalOpen(false);
+    openPricing();
+  };
 
   const loadFeatureSummaries = async (): Promise<void> => {
     const resp = await runtimeMessage<unknown>({ type: 'TT_GET_FEATURE_SUMMARIES' });
@@ -774,7 +931,10 @@ function DashboardApp(): JSX.Element {
       setWorkspaceSteps([]);
       setWorkspaceNetworkLogs([]);
       setWorkspaceConsoleEvents([]);
+      setWorkspaceSignalEvents([]);
+      setWorkspaceRawEvents([]);
       setSelectedLogId(null);
+      setInspectorTab('summary');
       return;
     }
 
@@ -790,6 +950,9 @@ function DashboardApp(): JSX.Element {
         setWorkspaceSteps([]);
         setWorkspaceNetworkLogs([]);
         setWorkspaceConsoleEvents([]);
+        setWorkspaceSignalEvents([]);
+        setWorkspaceRawEvents([]);
+        setInspectorTab('summary');
         return;
       }
 
@@ -806,6 +969,7 @@ function DashboardApp(): JSX.Element {
           pageUrl: event.pageUrl,
         }))
         .sort((a, b) => a.ts - b.ts);
+      const signalEvents = buildDiagnosticSignals(events);
       const evidenceById = await buildEvidenceMap(activeSession.id);
 
       const cards = await mapWithConcurrency<Step, WorkspaceStep>(steps, 6, async (step) => {
@@ -820,12 +984,15 @@ function DashboardApp(): JSX.Element {
         setWorkspaceSteps(cards);
         setWorkspaceNetworkLogs(networkLogs);
         setWorkspaceConsoleEvents(consoleEvents);
+        setWorkspaceSignalEvents(signalEvents);
+        setWorkspaceRawEvents(events);
         setViewTab(pendingViewTabRef.current ?? 'qa');
         pendingViewTabRef.current = null;
         setSelectedLogId((current) => {
           if (!current) return networkLogs[0]?.id ?? null;
           return networkLogs.some((log) => log.id === current) ? current : (networkLogs[0]?.id ?? null);
         });
+        setInspectorTab('summary');
       }
     })();
 
@@ -1168,6 +1335,7 @@ function DashboardApp(): JSX.Element {
     if (!target) return;
     pendingViewTabRef.current = 'dev';
     pendingTraceStepIndexRef.current = stepIndex;
+    setDevTracePane('timeline');
     setActiveTab('Test Cases');
     setActiveSession(target);
   };
@@ -1187,25 +1355,36 @@ function DashboardApp(): JSX.Element {
     pendingTraceStepIndexRef.current = null;
   }, [viewTab, workspaceSteps, activeSession]);
 
+  const describeCopyResult = (
+    label: 'Evidence copied' | 'Feature summary copied',
+    result: { mode: 'rich' | 'text'; imageCount: number; missingImageCount: number },
+  ): string => {
+    const modeSuffix = result.mode === 'rich' ? 'rich format' : 'markdown text';
+    if (result.imageCount === 0 && result.missingImageCount === 0) return `${label} (${modeSuffix})`;
+    if (result.missingImageCount === 0) return `${label} (${result.imageCount} screenshot${result.imageCount === 1 ? '' : 's'}, ${modeSuffix})`;
+    return `${label} (${result.imageCount} screenshot${result.imageCount === 1 ? '' : 's'}, ${result.missingImageCount} unavailable)`;
+  };
+
   const handleCopyEvidence = async (): Promise<void> => {
     if (exportModalContext === 'feature') {
       if (!activeFeature) {
         pushToast('Select a feature before copying evidence.', 'error');
         return;
       }
-      setExportStatusText('Copying feature summary...');
+      setExportStatusText('Copying feature summary…');
       setIsCopyingEvidence(true);
       try {
         const sessions = resolveStructuredExportSessions('feature', sessionSelectionMode);
         const bundles = await loadBundlesForSessions(sessions);
         if (bundles.length === 0) throw new Error('Could not load runs for feature copy.');
-        await copyFeatureEvidence(bundles, activeFeature);
-        setExportStatusText('Feature summary copied');
+        const result = await copyFeatureEvidence(bundles, activeFeature);
+        const success = describeCopyResult('Feature summary copied', result);
+        setExportStatusText(success);
         pushToast('Feature summary copied', 'success');
       } catch (error) {
-        const message = error instanceof Error ? error.message : "Couldn't copy feature summary. Try again.";
+        const message = error instanceof Error ? error.message : 'Could not copy feature summary. Try again.';
         setExportStatusText(message);
-        pushToast("Couldn't copy feature summary. Try again.", 'error');
+        pushToast(message, 'error');
         console.error('[dashboard] feature copy failed', error);
       } finally {
         setIsCopyingEvidence(false);
@@ -1218,20 +1397,20 @@ function DashboardApp(): JSX.Element {
       return;
     }
 
-    setExportStatusText('Copying evidence...');
+    setExportStatusText('Copying evidence…');
     setIsCopyingEvidence(true);
     try {
       const bundle = await getSessionExportData(activeSession.id);
       if (!bundle) throw new Error('Could not load this run for copy evidence.');
 
-      await copySessionEvidence(bundle);
-
-      setExportStatusText('Evidence copied');
+      const result = await copySessionEvidence(bundle);
+      const success = describeCopyResult('Evidence copied', result);
+      setExportStatusText(success);
       pushToast('Evidence copied', 'success');
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Couldn't copy evidence. Try again.";
+      const message = error instanceof Error ? error.message : 'Could not copy evidence. Try again.';
       setExportStatusText(message);
-      pushToast("Couldn't copy evidence. Try again.", 'error');
+      pushToast(message, 'error');
       console.error('[dashboard] copy evidence failed', error);
     } finally {
       setIsCopyingEvidence(false);
@@ -1472,26 +1651,24 @@ function DashboardApp(): JSX.Element {
     }
   };
 
-  const openFeatureExportModal = (): void => {
+  const openExportModal = (context: ExportModalContext): void => {
     const preferredFormat = defaultExportFormat();
-    const preferredMode: SessionSelectionMode = 'latest';
-    setExportModalContext('feature');
+    const preferredMode: SessionSelectionMode = context === 'feature' ? 'latest' : 'selected';
+
+    setExportModalContext(context);
     setSelectedExportFormat(preferredFormat);
     setSessionSelectionMode(preferredMode);
     setExportStatusText(null);
     setIsExportModalOpen(true);
-    void loadExportPreflight(preferredFormat, preferredMode, 'feature');
+    void loadExportPreflight(preferredFormat, preferredMode, context);
+  };
+
+  const openFeatureExportModal = (): void => {
+    openExportModal('feature');
   };
 
   const openTestCaseExportModal = (): void => {
-    const preferredFormat = defaultExportFormat();
-    const preferredMode: SessionSelectionMode = 'selected';
-    setExportModalContext('test-case');
-    setSelectedExportFormat(preferredFormat);
-    setSessionSelectionMode(preferredMode);
-    setExportStatusText(null);
-    setIsExportModalOpen(true);
-    void loadExportPreflight(preferredFormat, preferredMode, 'test-case');
+    openExportModal('test-case');
   };
 
   const handleExportFormatChange = (format: ExportFormat): void => {
@@ -1509,7 +1686,7 @@ function DashboardApp(): JSX.Element {
   const runUnifiedExport = async (format: ExportFormat): Promise<void> => {
     if (exportInFlightRef.current || isAnyExportRunning) return;
 
-    setExportStatusText('Preparing export...');
+    setExportStatusText('Preparing export…');
 
     const sessions = resolveStructuredExportSessions(exportModalContext, sessionSelectionMode);
     const eligibilityIssue = format !== 'bflow' && sessions.length === 0
@@ -1618,16 +1795,66 @@ function DashboardApp(): JSX.Element {
     void importBflowFile(file);
   };
 
-  const filteredNetworkLogs = useMemo(() => {
+  const netPhaseEvents = useMemo(
+    () => workspaceRawEvents.filter((event): event is Extract<TestEvent, { kind: 'net_phase' }> => event.kind === 'net_phase'),
+    [workspaceRawEvents],
+  );
+
+  const networkRows = useMemo(() => workspaceNetworkLogs.map((log) => {
+    const matched = netPhaseEvents
+      .filter((event) => event.phase === 'complete' || event.phase === 'error')
+      .filter((event) => event.method === log.method)
+      .filter((event) => event.url === log.url)
+      .filter((event) => {
+        const eventStatus = event.statusCode ?? (event.phase === 'error' ? 0 : undefined);
+        return eventStatus === log.status;
+      })
+      .map((event) => ({ event, diff: Math.abs(event.ts - log.timestamp) }))
+      .filter((item) => item.diff <= 3000)
+      .sort((a, b) => a.diff - b.diff)[0]?.event;
+
+    const normalizedType = normalizeResourceType(matched?.resourceType);
+    return {
+      log,
+      matchedNetPhase: matched ?? null,
+      normalizedType,
+      typeLabel: resourceTypeLabel(normalizedType),
+      statusClass: networkStatusClass(log.status),
+      hasBody: Boolean(log.requestBody || log.responseBody),
+    };
+  }), [workspaceNetworkLogs, netPhaseEvents]);
+
+  const networkMethodOptions = useMemo(
+    () => ['all', ...Array.from(new Set(networkRows.map((row) => row.log.method))).sort((a, b) => a.localeCompare(b))],
+    [networkRows],
+  );
+
+  const filteredNetworkRows = useMemo(() => {
     const query = devtoolsFilter.trim().toLowerCase();
-    if (!query) return workspaceNetworkLogs;
-    return workspaceNetworkLogs.filter((log) => {
-      const haystack = `${log.method} ${log.url}`.toLowerCase();
+    return networkRows.filter((row) => {
+      if (networkTypeFilter !== 'all' && row.normalizedType !== networkTypeFilter) return false;
+      if (networkStatusFilter !== 'all' && row.statusClass !== networkStatusFilter) return false;
+      if (networkMethodFilter !== 'all' && row.log.method !== networkMethodFilter) return false;
+      if (networkBodyOnly && !row.hasBody) return false;
+      if (!query) return true;
+      const haystack = `${row.log.method} ${row.log.url} ${row.log.status} ${row.typeLabel} ${row.matchedNetPhase?.errorText ?? ''}`.toLowerCase();
       return haystack.includes(query);
     });
-  }, [workspaceNetworkLogs, devtoolsFilter]);
+  }, [networkRows, networkTypeFilter, networkStatusFilter, networkMethodFilter, networkBodyOnly, devtoolsFilter]);
+
+  const filteredConsoleRows = useMemo(() => {
+    const query = devtoolsFilter.trim().toLowerCase();
+    return workspaceConsoleEvents.filter((event) => {
+      if (consoleLevelFilter !== 'all' && event.level !== consoleLevelFilter) return false;
+      if (!query) return true;
+      const haystack = `${event.level} ${event.message} ${event.pageUrl ?? ''}`.toLowerCase();
+      return haystack.includes(query);
+    });
+  }, [workspaceConsoleEvents, consoleLevelFilter, devtoolsFilter]);
 
   const traceRows = useMemo<TraceTimelineRow[]>(() => {
+    const query = devtoolsFilter.trim().toLowerCase();
+
     const stepRows: TraceStepRow[] = workspaceSteps.map((step) => ({
       type: 'step',
       id: `step-${step.step.id}`,
@@ -1635,40 +1862,56 @@ function DashboardApp(): JSX.Element {
       step,
     }));
 
-    const logRows: TraceLogRow[] = filteredNetworkLogs.map((log) => ({
-      type: 'log',
-      id: log.id,
-      ts: log.timestamp,
-      log,
-    }));
-
-    const consoleRows: TraceConsoleRow[] = workspaceConsoleEvents
+    const signalRows: TraceSignalRow[] = workspaceSignalEvents
       .filter((event) => {
-        const query = devtoolsFilter.trim().toLowerCase();
         if (!query) return true;
-        const haystack = `${event.level} ${event.message} ${event.pageUrl ?? ''}`.toLowerCase();
+        const haystack = `${event.source} ${event.level} ${event.message} ${event.pageUrl ?? ''}`.toLowerCase();
         return haystack.includes(query);
       })
-      .map((event) => ({
-        type: 'console',
-        id: event.id,
-        ts: event.ts,
-        level: event.level,
-        message: event.message,
-        pageUrl: event.pageUrl,
-      }));
+      .map((event) => ({ type: 'signal', id: event.id, ts: event.ts, signal: event }));
 
-    return [...stepRows, ...consoleRows, ...logRows].sort((a, b) => {
+    const netPhaseRows: TraceNetPhaseRow[] = netPhaseEvents
+      .filter((event) => {
+        if (!query) return true;
+        const haystack = `${event.phase} ${event.method} ${event.url} ${event.statusCode ?? ''} ${event.errorText ?? ''} ${event.resourceType}`.toLowerCase();
+        return haystack.includes(query);
+      })
+      .map((event) => ({ type: 'net-phase', id: event.id, ts: event.ts, event }));
+
+    const logRows: TraceLogRow[] = filteredNetworkRows.map((row) => ({
+      type: 'log',
+      id: row.log.id,
+      ts: row.log.timestamp,
+      log: row.log,
+    }));
+
+    const consoleRows: TraceConsoleRow[] = filteredConsoleRows
+      .map((event) => ({ type: 'console', id: event.id, ts: event.ts, level: event.level, message: event.message, pageUrl: event.pageUrl }));
+
+    return [...stepRows, ...signalRows, ...netPhaseRows, ...consoleRows, ...logRows].sort((a, b) => {
       if (a.ts !== b.ts) return a.ts - b.ts;
-      const rank = (row: TraceTimelineRow): number => (row.type === 'step' ? 0 : row.type === 'console' ? 1 : 2);
+      const rank = (row: TraceTimelineRow): number => {
+        if (row.type === 'step') return 0;
+        if (row.type === 'signal') return 1;
+        if (row.type === 'net-phase') return 2;
+        if (row.type === 'console') return 3;
+        return 4;
+      };
       return rank(a) - rank(b);
     });
-  }, [workspaceSteps, filteredNetworkLogs, workspaceConsoleEvents, devtoolsFilter]);
+  }, [workspaceSteps, workspaceSignalEvents, netPhaseEvents, filteredNetworkRows, filteredConsoleRows, devtoolsFilter]);
 
   const selectedLog = useMemo(
     () => workspaceNetworkLogs.find((log) => log.id === selectedLogId) ?? null,
     [workspaceNetworkLogs, selectedLogId],
   );
+
+  const selectedNetworkRow = useMemo(
+    () => networkRows.find((row) => row.log.id === selectedLogId) ?? null,
+    [networkRows, selectedLogId],
+  );
+
+  const selectedNetPhase = selectedNetworkRow?.matchedNetPhase ?? null;
 
   const serverErrorCount = useMemo(
     () => workspaceNetworkLogs.filter((log) => log.status >= 500 || log.status === 0).length,
@@ -1680,16 +1923,114 @@ function DashboardApp(): JSX.Element {
     [workspaceNetworkLogs],
   );
 
-  const inspectorPayload = useMemo(() => {
-    if (!selectedLog) return 'Select a network row to inspect payloads.';
+  const webVitalEvents = useMemo(
+    () => workspaceRawEvents.filter((event): event is Extract<TestEvent, { kind: 'web_vital' }> => event.kind === 'web_vital'),
+    [workspaceRawEvents],
+  );
 
-    if (inspectorTab === 'headers') {
+  const latestVitals = useMemo(() => {
+    const latest = new Map<string, Extract<TestEvent, { kind: 'web_vital' }>>();
+    for (const event of webVitalEvents) {
+      const prev = latest.get(event.name);
+      if (!prev || event.ts > prev.ts) latest.set(event.name, event);
+    }
+    return [...latest.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }, [webVitalEvents]);
+
+  const longTaskEvents = useMemo(
+    () => workspaceRawEvents.filter((event): event is Extract<TestEvent, { kind: 'long_task' }> => event.kind === 'long_task'),
+    [workspaceRawEvents],
+  );
+
+  const memoryEvents = useMemo(
+    () => workspaceRawEvents.filter((event): event is Extract<TestEvent, { kind: 'memory_snapshot' }> => event.kind === 'memory_snapshot'),
+    [workspaceRawEvents],
+  );
+
+  const resourceTimingEvents = useMemo(
+    () => workspaceRawEvents.filter((event): event is Extract<TestEvent, { kind: 'resource_timing' }> => event.kind === 'resource_timing'),
+    [workspaceRawEvents],
+  );
+
+  const poorVitalCount = useMemo(() => webVitalEvents.filter((event) => event.rating === 'poor').length, [webVitalEvents]);
+  const longTaskSevereCount = useMemo(() => longTaskEvents.filter((event) => event.duration >= 200).length, [longTaskEvents]);
+  const maxHeapMb = useMemo(() => {
+    if (!memoryEvents.length) return 0;
+    const maxBytes = Math.max(...memoryEvents.map((event) => event.usedJSHeapSizeBytes));
+    return Math.round((maxBytes / (1024 * 1024)) * 10) / 10;
+  }, [memoryEvents]);
+
+  const correlationHints = useMemo(() => {
+    if (!selectedNetPhase) return [] as string[];
+    const headers = selectedNetPhase.responseHeaders ?? {};
+    const keys = ['x-request-id', 'x-trace-id', 'x-correlation-id', 'cf-ray'] as const;
+    return keys
+      .map((key) => headers[key] ? `${key}=${headers[key]}` : null)
+      .filter((value): value is string => Boolean(value));
+  }, [selectedNetPhase]);
+
+  const diagnosticIssues = useMemo<DiagnosticIssue[]>(
+    () => buildDiagnosticIssues(workspaceNetworkLogs, workspaceConsoleEvents, workspaceRawEvents),
+    [workspaceNetworkLogs, workspaceConsoleEvents, workspaceRawEvents],
+  );
+
+  const rootCauseSummary = useMemo(
+    () => inferRootCauseSummary(workspaceNetworkLogs, workspaceConsoleEvents, workspaceRawEvents),
+    [workspaceNetworkLogs, workspaceConsoleEvents, workspaceRawEvents],
+  );
+
+  const openIssueTarget = (issue: DiagnosticIssue): void => {
+    setDevTracePane(issue.panel);
+    if (issue.suggestedStatusFilter) setNetworkStatusFilter(issue.suggestedStatusFilter);
+    if (issue.suggestedConsoleFilter) setConsoleLevelFilter(issue.suggestedConsoleFilter);
+  };
+
+  const inspectorPayload = useMemo(() => {
+    if (!selectedLog) return 'Select a network row to inspect.';
+
+    const responseHeaders = selectedNetPhase?.responseHeaders ?? {};
+    const headerLines = Object.entries(responseHeaders)
+      .map(([key, value]) => `${key}: ${value}`)
+      .sort((a, b) => a.localeCompare(b));
+
+    if (inspectorTab === 'summary') {
       return [
         `Method: ${selectedLog.method}`,
         `URL: ${selectedLog.url}`,
         `Status: ${selectedLog.status}`,
-        `Timestamp: ${fmtDate(selectedLog.timestamp)}`,
+        `Time: ${fmtDate(selectedLog.timestamp)}`,
         `Duration: ${Math.round(selectedLog.durationMs ?? 0)} ms`,
+        `Resource type: ${selectedNetPhase?.resourceType ?? selectedNetworkRow?.typeLabel ?? 'unknown'}`,
+        `Phase: ${selectedNetPhase?.phase ?? 'n/a'}`,
+      ].join('\n');
+    }
+
+    if (inspectorTab === 'headers') {
+      return [
+        'Request headers: unavailable in current capture model',
+        '',
+        'Response headers:',
+        ...(headerLines.length > 0 ? headerLines : ['n/a']),
+        '',
+        `Dropped header count: ${selectedNetPhase?.droppedHeaderCount ?? 0}`,
+      ].join('\n');
+    }
+
+    if (inspectorTab === 'timing') {
+      return [
+        `Started at: ${fmtDate(selectedLog.timestamp - Math.round(selectedLog.durationMs ?? 0))}`,
+        `Finished at: ${fmtDate(selectedLog.timestamp)}`,
+        `Duration: ${Math.round(selectedLog.durationMs ?? 0)} ms`,
+        `From cache: ${selectedNetPhase?.fromCache ? 'yes' : 'no'}`,
+      ].join('\n');
+    }
+
+    if (inspectorTab === 'correlation') {
+      return [
+        'Copy these keys into backend observability tools:',
+        ...(correlationHints.length > 0 ? correlationHints : ['No correlation headers found']),
+        '',
+        'Tip: cf-ray helps map edge failures in Cloudflare logs.',
       ].join('\n');
     }
 
@@ -1700,7 +2041,7 @@ function DashboardApp(): JSX.Element {
     } catch {
       return raw;
     }
-  }, [selectedLog, inspectorTab]);
+  }, [selectedLog, selectedNetPhase, selectedNetworkRow, inspectorTab, correlationHints]);
 
   const copyInspectorPayload = async (): Promise<void> => {
     if (!selectedLog) return;
@@ -1720,21 +2061,21 @@ function DashboardApp(): JSX.Element {
     setWorkspaceSteps([]);
     setWorkspaceNetworkLogs([]);
     setWorkspaceConsoleEvents([]);
+    setWorkspaceSignalEvents([]);
+    setWorkspaceRawEvents([]);
+    setDevtoolsFilter('');
+    setNetworkTypeFilter('all');
+    setNetworkStatusFilter('all');
+    setNetworkMethodFilter('all');
+    setNetworkBodyOnly(false);
+    setConsoleLevelFilter('all');
+    setDevTracePane('network');
+    setSelectedLogId(null);
+    setInspectorTab('summary');
     setBugTrackerRows([]);
     setBugTrackerLoading(false);
     navigateToView('dashboard');
     void loadFeatureSummaries();
-  };
-
-  const navigateToWelcome = (): void => {
-    setActiveFeature(null);
-    setActiveSession(null);
-    setFeatureSessions([]);
-    setWorkspaceSteps([]);
-    setWorkspaceNetworkLogs([]);
-    setWorkspaceConsoleEvents([]);
-    navigateToView('welcome');
-    pushToast('Checkout complete. Subscription activation is finalized by backend webhook processing.', 'info');
   };
 
   const createFeatureFromSearch = async (): Promise<void> => {
@@ -1764,6 +2105,7 @@ function DashboardApp(): JSX.Element {
     setModalState({
       title: 'Rename Feature',
       body: `Rename ${featureName}`,
+      confirmLabel: 'Rename feature',
       inputPlaceholder: 'New feature name',
       inputValue: featureName,
       onConfirm: async (value) => {
@@ -1800,6 +2142,7 @@ function DashboardApp(): JSX.Element {
       title: 'Delete Feature',
       body: `Delete ${featureName}? This action cannot be undone.`,
       isDanger: true,
+      confirmLabel: 'Delete feature',
       onConfirm: async () => {
         const response = await runtimeMessage<{ ok: boolean; error?: string }>({
           type: 'TT_DELETE_FEATURE',
@@ -1826,6 +2169,7 @@ function DashboardApp(): JSX.Element {
     setModalState({
       title: 'Rename Test Case',
       body: `Rename ${testCaseName}`,
+      confirmLabel: 'Rename test case',
       inputPlaceholder: 'New test case name',
       inputValue: testCaseName,
       onConfirm: async (value) => {
@@ -1865,6 +2209,7 @@ function DashboardApp(): JSX.Element {
       title: 'Delete Test Case',
       body: `Delete ${group.testCaseName} and all ${group.runs.length} runs?`,
       isDanger: true,
+      confirmLabel: 'Delete test case',
       onConfirm: async () => {
         for (const run of group.runs) {
           const response = await runtimeMessage<{ ok: boolean; error?: string }>({
@@ -1895,6 +2240,7 @@ function DashboardApp(): JSX.Element {
       body: `Move ${testCaseName} from ${activeFeature} to another feature`,
       inputPlaceholder: 'Search destination feature',
       inputValue: '',
+      confirmLabel: 'Move test case',
       onConfirm: async (value) => {
         const requestedFeature = value.trim();
         if (!requestedFeature || requestedFeature.toLowerCase() === activeFeature.toLowerCase()) return;
@@ -1942,10 +2288,91 @@ function DashboardApp(): JSX.Element {
     </div>
   );
 
+  // Global overlays are mounted once at every top-level return branch so that opening
+  // Export / Pricing / Rename etc. does not require the user to navigate back to a
+  // specific route to reveal the modal. (Fixes the historic "Export requires Back
+  // navigation to appear" bug caused by per-branch modal mounts.)
+  const globalOverlays = (
+    <>
+      {modalState && (
+        <Modal
+          title={modalState.title}
+          body={modalState.body}
+          inputPlaceholder={modalState.inputPlaceholder}
+          inputValue={modalState.inputValue}
+          isDanger={modalState.isDanger}
+          confirmLabel={modalState.confirmLabel}
+          onCancel={() => setModalState(null)}
+          onConfirm={async (value) => {
+            await modalState.onConfirm(value);
+          }}
+        />
+      )}
+      <ExportModal
+        context={exportModalContext}
+        isOpen={isExportModalOpen}
+        selectedFormat={selectedExportFormat}
+        selectionMode={sessionSelectionMode}
+        canUseSelectedRun={canUseSelectedRun}
+        canUseLatestRun={canUseLatestRun}
+        hasAnyExportableData={hasAnyExportableData}
+        preflight={exportPreflight}
+        isPreflighting={isExportPreflighting}
+        isExporting={isAnyExportRunning}
+        isCopyingEvidence={isCopyingEvidence}
+        exportStatusText={exportStatusText}
+        onSelectFormat={handleExportFormatChange}
+        onSelectMode={handleExportModeChange}
+        onConfirm={() => {
+          void runUnifiedExport(selectedExportFormat);
+        }}
+        onCopyEvidence={() => {
+          void handleCopyEvidence();
+        }}
+        canCopyEvidence={exportModalContext === 'feature' ? hasAnyExportableData : Boolean(activeSession)}
+        onClose={() => {
+          if (isAnyExportRunning || isCopyingEvidence) return;
+          setIsExportModalOpen(false);
+        }}
+      />
+      <AccountModal
+        isOpen={isAccountModalOpen}
+        isAuthLoading={authLoading}
+        authStatus={authStatus}
+        onClose={() => setIsAccountModalOpen(false)}
+        onOpenPricing={openPricingFromAccount}
+        onAuthStatusChange={(status) => {
+          setAuthStatus(status);
+          setAuthLoading(false);
+        }}
+        runtimeMessage={runtimeMessage}
+      />
+      <PricingModal
+        isOpen={routeView === 'pricing'}
+        onClose={closePricing}
+        onAuthSuccess={() => {
+          void refreshAuthStatus(false);
+          navigateToView('dashboard', 'replace');
+        }}
+        onOpenAccount={() => {
+          closePricing();
+          setIsAccountModalOpen(true);
+        }}
+        onAuthStatusChange={(status) => {
+          setAuthStatus(status);
+          setAuthLoading(false);
+        }}
+        runtimeMessage={runtimeMessage}
+      />
+      {toastStack}
+    </>
+  );
+
   if (!routingApplied || authLoading) {
     return (
       <div class="dash-shell">
-        <main class="dash-main"><p style="color:var(--fg-muted)" role="status" aria-live="polite">{!routingApplied ? 'Loading dashboard...' : 'Restoring session...'}</p></main>
+        <main class="dash-main"><p class="text-muted" role="status" aria-live="polite">{!routingApplied ? 'Loading dashboard…' : 'Restoring session…'}</p></main>
+        {globalOverlays}
       </div>
     );
   }
@@ -1957,29 +2384,15 @@ function DashboardApp(): JSX.Element {
       <div class="dash-shell">
         <main class="dash-main">
           <section class="card welcome-surface">
-            <h2>Welcome to BusinessFlow Pro</h2>
-            <p>Your checkout completed. Subscription activation is finalized via backend webhook processing.</p>
-            <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;">
-              <button class="btn btn-primary" onClick={() => navigateToView('dashboard')}>Go to Dashboard</button>
-              <button class="btn btn-outline" onClick={openPricing}>Manage account & billing</button>
+            <h2>Welcome to BusinessFlow</h2>
+            <p>Your checkout is complete. Your plan should be active in a few moments.</p>
+            <div class="actions-row actions-row--center">
+              <button class="btn btn-primary" onClick={() => navigateToView('dashboard')}>Open dashboard</button>
+              <button class="btn btn-outline" onClick={openAccount}>My account</button>
             </div>
           </section>
         </main>
-        <PricingModal
-          isOpen={false}
-          onClose={closePricing}
-          onNavigateWelcome={navigateToWelcome}
-          onAuthSuccess={() => {
-            void refreshAuthStatus(false);
-            navigateToView('dashboard', 'replace');
-          }}
-          onAuthStatusChange={(status) => {
-            setAuthStatus(status);
-            setAuthLoading(false);
-          }}
-          runtimeMessage={runtimeMessage}
-        />
-        {toastStack}
+        {globalOverlays}
       </div>
     );
   }
@@ -1993,17 +2406,32 @@ function DashboardApp(): JSX.Element {
         onDrop={(event) => handleDashboardDrop(event as unknown as DragEvent)}
       >
         <main class="dash-main">
+          <PlanGate
+            enabled={false}
+            feature="workspace.dashboard"
+            access={accessContext}
+            onViewPricing={() => openPricing()}
+            onOpenAccount={openAccount}
+          >
           <div class="dash-header-bar dash-header home-hero">
-            <div>
-              <img class="home-brand-wordmark" src="../../logo/Brand_Name.png" alt="BusinessFlow" />
+            <div class="home-brand-head">
+              <img class="home-brand-logo" src="../../logo/Logo.png" alt="BusinessFlow" />
+              <div>
+                <h1 class="home-title">BusinessFlow</h1>
+                <p class="home-subtitle">Capture evidence while you run QA.</p>
+              </div>
             </div>
-            <button class="btn btn-primary" onClick={openPricing}>View Pricing</button>
+            <div class="home-hero-actions">
+              <button class="btn btn-outline home-hero-btn home-hero-btn--account" onClick={openAccount}>My account</button>
+              <button class="btn btn-primary home-hero-btn home-hero-btn--pricing" onClick={(event) => openPricing(event)}>View pricing</button>
+
+            </div>
           </div>
 
           {featureSummaries.length === 0 ? (
             <section class="home-empty-state">
               <h3>Welcome to BusinessFlow</h3>
-              <p>No test runs found. Open the Chrome Extension to record your first flow.</p>
+              <p>No test runs yet. Open the extension panel and start recording your first run.</p>
             </section>
           ) : (
             <>
@@ -2013,7 +2441,7 @@ function DashboardApp(): JSX.Element {
                   type="text"
                   class="search-input feature-search-input"
                   aria-label="Search features"
-                  placeholder="Search features..."
+                  placeholder="Search features…"
                   value={featureSearch}
                   onInput={(event) => setFeatureSearch((event.target as HTMLInputElement).value)}
                   onKeyDown={(event) => {
@@ -2028,7 +2456,7 @@ function DashboardApp(): JSX.Element {
                 <section class="card">
                   <p style="margin:0 0 12px;color:var(--fg-muted)">No feature matches "{featureSearch.trim()}".</p>
                   <button class="btn btn-primary" onClick={createFeatureFromSearch}>
-                    Create Feature "{featureSearch.trim()}"
+                    Create feature "{featureSearch.trim()}"
                   </button>
                 </section>
               ) : (
@@ -2084,9 +2512,9 @@ function DashboardApp(): JSX.Element {
                               <div class="feature-mini-donut-hole">{Math.round(passRate)}%</div>
                             </div>
                             <div class="feature-card-metrics">
-                              <span><strong>Tests Passed:</strong> {feature.passed}</span>
-                              <span><strong>Tests Failed:</strong> {feature.failed}</span>
-                              <span><strong>Tests Blocked:</strong> {feature.blocked}</span>
+                              <span><strong>Passed test cases:</strong> {feature.passed}</span>
+                              <span><strong>Failed test cases:</strong> {feature.failed}</span>
+                              <span><strong>Blocked test cases:</strong> {feature.blocked}</span>
                             </div>
                           </div>
 
@@ -2108,66 +2536,13 @@ function DashboardApp(): JSX.Element {
               )}
             </>
           )}
+          </PlanGate>
         </main>
 
         <div class={`bflow-dropzone ${isBflowDragging ? 'dragging' : ''}`}>
-          <div class="bflow-drop-text">Drop .bflow file to import</div>
+          <div class="bflow-drop-text">Drop a .bflow file to import</div>
         </div>
-        {modalState && (
-          <Modal
-            title={modalState.title}
-            body={modalState.body}
-            inputPlaceholder={modalState.inputPlaceholder}
-            inputValue={modalState.inputValue}
-            isDanger={modalState.isDanger}
-            onCancel={() => setModalState(null)}
-            onConfirm={async (value) => {
-              await modalState.onConfirm(value);
-            }}
-          />
-        )}
-        <ExportModal
-          context={exportModalContext}
-          isOpen={isExportModalOpen}
-          selectedFormat={selectedExportFormat}
-          selectionMode={sessionSelectionMode}
-          canUseSelectedRun={canUseSelectedRun}
-          canUseLatestRun={canUseLatestRun}
-          hasAnyExportableData={hasAnyExportableData}
-          preflight={exportPreflight}
-          isPreflighting={isExportPreflighting}
-          isExporting={isAnyExportRunning}
-          isCopyingEvidence={isCopyingEvidence}
-          exportStatusText={exportStatusText}
-          onSelectFormat={handleExportFormatChange}
-          onSelectMode={handleExportModeChange}
-          onConfirm={() => {
-            void runUnifiedExport(selectedExportFormat);
-          }}
-          onCopyEvidence={() => {
-            void handleCopyEvidence();
-          }}
-          canCopyEvidence={exportModalContext === 'feature' ? hasAnyExportableData : Boolean(activeSession)}
-          onClose={() => {
-            if (isAnyExportRunning || isCopyingEvidence) return;
-            setIsExportModalOpen(false);
-          }}
-        />
-        <PricingModal
-          isOpen={routeView === 'pricing'}
-          onClose={closePricing}
-          onNavigateWelcome={navigateToWelcome}
-          onAuthSuccess={() => {
-            void refreshAuthStatus(false);
-            navigateToView('dashboard', 'replace');
-          }}
-          onAuthStatusChange={(status) => {
-            setAuthStatus(status);
-            setAuthLoading(false);
-          }}
-          runtimeMessage={runtimeMessage}
-        />
-        {toastStack}
+        {globalOverlays}
       </div>
     );
   }
@@ -2189,12 +2564,19 @@ function DashboardApp(): JSX.Element {
                 <span class="breadcrumb-separator">/</span>
                 <span>{activeFeature}</span>
               </div>
-              <div style="display:flex;gap:8px;align-items:center;">
-                <button class="btn btn-outline" onClick={openPricing}>
+              <div class="actions-row">
+                <button class="btn btn-outline" onClick={openAccount}>
+                  My account
+                </button>
+                <button class="btn btn-outline" onClick={(event) => openPricing(event)}>
                   Pricing
                 </button>
-                <button class="btn btn-outline" onClick={openFeatureExportModal}>
-                  Export…
+                <button
+                  class="btn btn-primary"
+                  onClick={openFeatureExportModal}
+                  disabled={isAnyExportRunning || isCopyingEvidence}
+                >
+                  {isAnyExportRunning ? 'Exporting…' : isCopyingEvidence ? 'Copying…' : 'Export evidence'}
                 </button>
               </div>
             </div>
@@ -2220,13 +2602,13 @@ function DashboardApp(): JSX.Element {
               <section class="card-panel">
                 <div class="card-title">API Reliability</div>
                 <div class="kpi-value">{reliability.successRateLabel}</div>
-                <div style="font-size:12px;color:var(--fg-muted);">Overall Success Rate</div>
+                <div class="text-caption">Overall Success Rate</div>
                 <div class="thick-health-bar">
                   <div class="health-segment segment-success" style={{ width: `${reliability.successPct}%` }} />
                   <div class="health-segment segment-warn" style={{ width: `${reliability.warnPct}%` }} />
                   <div class="health-segment segment-critical" style={{ width: `${reliability.criticalPct}%` }} />
                 </div>
-                <div style="display:flex;gap:14px;margin-top:12px;font-size:12px;color:var(--fg-muted);flex-wrap:wrap;">
+                <div class="text-caption" style="display:flex;gap:14px;margin-top:12px;flex-wrap:wrap;">
                   <span>2xx/3xx: {featureNetworkStats.successCount}</span>
                   <span>4xx: {featureNetworkStats.warnCount}</span>
                   <span>5xx/0: {featureNetworkStats.errorCount}</span>
@@ -2288,7 +2670,7 @@ function DashboardApp(): JSX.Element {
                     type="text"
                     class="search-input"
                     aria-label="Search test cases"
-                    placeholder="Search test cases..."
+                    placeholder="Search test cases…"
                     value={testCaseSearch}
                     onInput={(event) => setTestCaseSearch((event.target as HTMLInputElement).value)}
                   />
@@ -2314,7 +2696,7 @@ function DashboardApp(): JSX.Element {
                 </div>
                 {filteredTestCaseGroups.length === 0 && (
                   <div class="card">
-                    <p style="margin:0;color:var(--fg-muted)">No test cases found for current filters.</p>
+                    <p style="margin:0;color:var(--fg-muted)">No test cases match these filters.</p>
                   </div>
                 )}
                 {filteredTestCaseGroups.map((group) => {
@@ -2347,7 +2729,7 @@ function DashboardApp(): JSX.Element {
                     >
                       <div class="test-case-info">
                         <div style="font-weight:600;color:var(--fg-main)">{group.testCaseName}</div>
-                        <div style="font-size:12px;color:var(--fg-muted)">{group.runs.length} runs | Latest: {latestRun ? fmtDate(latestRun.startedAt) : 'n/a'}</div>
+                        <div class="text-caption">{group.runs.length} runs | Latest: {latestRun ? fmtDate(latestRun.startedAt) : 'n/a'}</div>
                       </div>
                       <div class="test-case-actions" onClick={(event) => event.stopPropagation()}>
                         <span class={`test-status-chip ${statusUi.badgeClass}`}>
@@ -2373,12 +2755,12 @@ function DashboardApp(): JSX.Element {
 
             {activeTab === 'Bug Tracker' && (
               <div class="issue-board" role="tabpanel" id="feature-tab-bug-tracker" aria-labelledby="feature-tab-btn-bug-tracker">
-                {bugTrackerLoading && <p style="color:var(--fg-muted)" role="status" aria-live="polite">Loading issue matrix...</p>}
+                {bugTrackerLoading && <p class="text-muted" role="status" aria-live="polite">Loading findings…</p>}
 
                 {!bugTrackerLoading && bugTrackerGroups.length === 0 && (
                   <div class="issue-empty">
-                    <h3>No issues found</h3>
-                    <p>Bugs you pin on screenshots and technical step failures will appear here.</p>
+                    <h3>No findings yet</h3>
+                    <p>Pinned bugs and technical failures appear here.</p>
                   </div>
                 )}
 
@@ -2391,7 +2773,7 @@ function DashboardApp(): JSX.Element {
                           checked={showStaleBugs}
                           onChange={(event) => setShowStaleBugs((event.target as HTMLInputElement).checked)}
                         />
-                        <span>Show stale bugs from older runs</span>
+                        <span>Show findings from earlier runs</span>
                       </label>
                     </div>
 
@@ -2477,7 +2859,7 @@ function DashboardApp(): JSX.Element {
               <div class="case-header-top">
                 <div class="case-identity">
                   <button class="case-back" onClick={() => setActiveSession(null)}>
-                    ← Back
+                    ← Back to test cases
                   </button>
                   <div class="case-titles">
                     <h2 class="case-title">{activeSession.testCaseName || 'Untitled Test Case'}</h2>
@@ -2578,7 +2960,7 @@ function DashboardApp(): JSX.Element {
                   </div>
 
                   <button class="btn btn-primary" onClick={openTestCaseExportModal} disabled={isAnyExportRunning || isCopyingEvidence}>
-                    {isAnyExportRunning ? 'Exporting…' : 'Export…'}
+                    {isAnyExportRunning ? 'Exporting…' : 'Export evidence'}
                   </button>
                 </div>
               </div>
@@ -2782,7 +3164,7 @@ function DashboardApp(): JSX.Element {
                                   highlightRect={beforeHighlightRect(stepItem.step)}
                                   {...annotationProps}
                                 />
-                              : <div style="color:var(--fg-muted)">No screenshot available</div>}
+                              : <div class="text-muted">No screenshot available</div>}
                           </div>
                           <div style="color:var(--fg-muted);font-weight:700">-&gt;</div>
                           <div class="step-screenshot-container">
@@ -2813,7 +3195,7 @@ function DashboardApp(): JSX.Element {
                           )}
                         </div>
                       ) : (
-                        <div style="color:var(--fg-muted)">No screenshot available</div>
+                        <div class="text-muted">No screenshot available</div>
                       )}
 
                       <div class="step-annotation-bar">
@@ -2869,222 +3251,381 @@ function DashboardApp(): JSX.Element {
 
             {viewTab === 'dev' && (
               <section id="session-tab-diagnostics" role="tabpanel" aria-labelledby="session-tab-btn-diagnostics" style="display:flex;flex-direction:column;gap:12px;">
+                <div class="devtrace-pane-tabs" role="tablist" aria-label="Developer trace views">
+                  <button class={`inspector-tab ${devTracePane === 'network' ? 'active' : ''}`} onClick={() => setDevTracePane('network')}>Network</button>
+                  <button class={`inspector-tab ${devTracePane === 'console' ? 'active' : ''}`} onClick={() => setDevTracePane('console')}>Console</button>
+                  <button class={`inspector-tab ${devTracePane === 'performance' ? 'active' : ''}`} onClick={() => setDevTracePane('performance')}>Performance</button>
+                  <button class={`inspector-tab ${devTracePane === 'timeline' ? 'active' : ''}`} onClick={() => setDevTracePane('timeline')}>Timeline</button>
+                  <button class={`inspector-tab ${devTracePane === 'issues' ? 'active' : ''}`} onClick={() => setDevTracePane('issues')}>Issues</button>
+                </div>
+
                 <div class="devtools-toolbar">
                   <input
                     class="input-field"
                     style="margin-top:0;max-width:360px"
-                    aria-label="Filter diagnostics by URL or method"
-                    placeholder="Filter by URL or method"
+                    aria-label="Filter developer trace"
+                    placeholder="Filter by URL, message, method, status"
                     value={devtoolsFilter}
                     onInput={(e) => setDevtoolsFilter((e.target as HTMLInputElement).value)}
                   />
-                  <div style="display:flex;gap:8px;align-items:center;">
-                    <span class="badge badge-muted">{filteredNetworkLogs.length} Requests</span>
-                    <span class="badge badge-danger">{serverErrorCount} Server Errors</span>
-                    <span class="badge badge-warning">{warningCount} Warnings</span>
+                  <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                    <span class="badge badge-muted">{filteredNetworkRows.length}/{workspaceNetworkLogs.length} requests</span>
+                    <span class="badge badge-muted">{filteredConsoleRows.length}/{workspaceConsoleEvents.length} console</span>
+                    <span class="badge badge-danger">{serverErrorCount} server errors</span>
+                    <span class="badge badge-warning">{warningCount} warnings</span>
                   </div>
                 </div>
 
-                <div class="devtools-table-container">
-                  <table class="devtools-table">
-                    <thead>
-                      <tr>
-                        <th>Status</th>
-                        <th>Method</th>
-                        <th>Endpoint / URL</th>
-                        <th>Time</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {traceRows.map((row) => {
-                        if (row.type === 'step') {
-                          const step = row.step;
-                          return (
-                            <tr key={row.id}>
-                              <td colSpan={4}>
-                                <details
-                                  id={`dev-step-${step.step.index}`}
-                                  class="dev-step-accordion"
-                                  open={pendingTraceStepIndexRef.current === step.step.index}
-                                >
-                                  <summary>Step: {stepLabel(step.step)} (Click to view screenshots)</summary>
-                                  <div style="padding:12px;display:flex;flex-direction:column;gap:10px;">
-                                    {step.afterScreenshotUrl ? (
-                                      <div class="step-screenshots-row">
-                                        <div class="step-screenshot-container">
-                                          {step.beforeScreenshotUrl && (
+                {devTracePane === 'network' && (
+                  <>
+                    <div class="devtools-toolbar" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                      <select class="input-field" style="margin-top:0;max-width:140px" value={networkTypeFilter} onChange={(e) => setNetworkTypeFilter((e.target as HTMLSelectElement).value as NetworkTypeFilter)}>
+                        <option value="all">All types</option>
+                        <option value="fetch-xhr">Fetch/XHR</option>
+                        <option value="websocket">WebSocket</option>
+                        <option value="sse">EventSource</option>
+                        <option value="document">Document</option>
+                        <option value="script">Script</option>
+                        <option value="stylesheet">Stylesheet</option>
+                        <option value="image">Image</option>
+                        <option value="font">Font</option>
+                        <option value="other">Other</option>
+                      </select>
+                      <select class="input-field" style="margin-top:0;max-width:140px" value={networkStatusFilter} onChange={(e) => setNetworkStatusFilter((e.target as HTMLSelectElement).value as NetworkStatusFilter)}>
+                        <option value="all">All status</option>
+                        <option value="success">2xx / 3xx</option>
+                        <option value="warning">4xx</option>
+                        <option value="critical">5xx / ERR</option>
+                      </select>
+                      <select class="input-field" style="margin-top:0;max-width:140px" value={networkMethodFilter} onChange={(e) => setNetworkMethodFilter((e.target as HTMLSelectElement).value)}>
+                        {networkMethodOptions.map((method) => (
+                          <option key={method} value={method}>{method === 'all' ? 'All methods' : method}</option>
+                        ))}
+                      </select>
+                      <label class="checkbox-inline" style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--fg-muted)">
+                        <input type="checkbox" checked={networkBodyOnly} onChange={(e) => setNetworkBodyOnly((e.target as HTMLInputElement).checked)} />
+                        with payload
+                      </label>
+                    </div>
+
+                    <div class="devtools-table-container">
+                      <table class="devtools-table">
+                        <thead>
+                          <tr>
+                            <th>Status</th>
+                            <th>Method</th>
+                            <th>Type</th>
+                            <th>Endpoint / URL</th>
+                            <th>Time</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {filteredNetworkRows.map((row) => (
+                            <tr
+                              key={row.log.id}
+                              class={`devtools-row ${row.statusClass === 'warning' ? 'warning' : ''} ${row.statusClass === 'critical' ? 'critical' : ''} ${selectedLogId === row.log.id ? 'selected' : ''}`}
+                              role="button"
+                              tabIndex={0}
+                              aria-label={`${row.log.method} ${endpointForLog(row.log.url)} status ${row.log.status || 'error'}`}
+                              onKeyDown={(event) => {
+                                if (!isKeyboardActivationKey(event.key)) return;
+                                event.preventDefault();
+                                setSelectedLogId(row.log.id);
+                                setInspectorTab('summary');
+                              }}
+                              onClick={() => {
+                                setSelectedLogId(row.log.id);
+                                setInspectorTab('summary');
+                              }}
+                            >
+                              <td><span class={`dev-log-status ${row.statusClass}`}>{row.log.status || 'ERR'}</span></td>
+                              <td>{row.log.method}</td>
+                              <td>{row.typeLabel}</td>
+                              <td>{endpointForLog(row.log.url)}</td>
+                              <td>{formatClock(row.log.timestamp)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    <div class="payload-inspector">
+                      <div class="inspector-tabs" style="flex-wrap:wrap;">
+                        <button class={`inspector-tab ${inspectorTab === 'summary' ? 'active' : ''}`} onClick={() => setInspectorTab('summary')}>Summary</button>
+                        <button class={`inspector-tab ${inspectorTab === 'headers' ? 'active' : ''}`} onClick={() => setInspectorTab('headers')}>Headers</button>
+                        <button class={`inspector-tab ${inspectorTab === 'payload' ? 'active' : ''}`} onClick={() => setInspectorTab('payload')}>Payload</button>
+                        <button class={`inspector-tab ${inspectorTab === 'response' ? 'active' : ''}`} onClick={() => setInspectorTab('response')}>Response</button>
+                        <button class={`inspector-tab ${inspectorTab === 'timing' ? 'active' : ''}`} onClick={() => setInspectorTab('timing')}>Timing</button>
+                        <button class={`inspector-tab ${inspectorTab === 'correlation' ? 'active' : ''}`} onClick={() => setInspectorTab('correlation')}>Correlation</button>
+                      </div>
+                      <div class="json-viewer-container">
+                        <button class="copy-btn" onClick={() => void copyInspectorPayload()}>
+                          {copyFeedback ? 'Copied!' : 'Copy panel'}
+                        </button>
+                        <pre class="json-viewer">{inspectorPayload}</pre>
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                {devTracePane === 'console' && (
+                  <>
+                    <div class="devtools-toolbar" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                      <select class="input-field" style="margin-top:0;max-width:160px" value={consoleLevelFilter} onChange={(e) => setConsoleLevelFilter((e.target as HTMLSelectElement).value as 'all' | 'error' | 'warn')}>
+                        <option value="all">All levels</option>
+                        <option value="error">Errors only</option>
+                        <option value="warn">Warnings only</option>
+                      </select>
+                    </div>
+                    <div class="devtools-table-container">
+                      <table class="devtools-table">
+                        <thead>
+                          <tr>
+                            <th>Level</th>
+                            <th>Message</th>
+                            <th>URL</th>
+                            <th>Time</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {filteredConsoleRows.map((row) => (
+                            <tr key={row.id} class={`devtools-row ${row.level === 'error' ? 'critical' : 'warning'}`}>
+                              <td><span class={`dev-log-status ${row.level === 'error' ? 'critical' : 'warning'}`}>{row.level.toUpperCase()}</span></td>
+                              <td>{row.message}</td>
+                              <td>{pathnameForUrl(row.pageUrl ?? '')}</td>
+                              <td>{formatClock(row.ts)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
+                )}
+
+                {devTracePane === 'performance' && (
+                  <div class="devtrace-grid">
+                    <article class="card">
+                      <h3>Web Vitals</h3>
+                      <div class="section-subtitle">Latest captured values</div>
+                      <ul class="devtrace-list">
+                        {latestVitals.map((vital) => (
+                          <li key={`${vital.name}-${vital.ts}`}>{vital.name}: {Math.round(vital.value * 10) / 10} ({vital.rating})</li>
+                        ))}
+                        {latestVitals.length === 0 && <li>No vitals captured yet.</li>}
+                      </ul>
+                    </article>
+                    <article class="card">
+                      <h3>Main Thread & Memory</h3>
+                      <ul class="devtrace-list">
+                        <li>Long tasks (&gt;50ms): {longTaskEvents.length}</li>
+                        <li>Severe long tasks (&gt;200ms): {longTaskSevereCount}</li>
+                        <li>Max JS heap used: {maxHeapMb} MB</li>
+                      </ul>
+                    </article>
+                    <article class="card">
+                      <h3>Resource Health</h3>
+                      <ul class="devtrace-list">
+                        <li>Resource timing snapshots: {resourceTimingEvents.length}</li>
+                        <li>Poor vitals count: {poorVitalCount}</li>
+                        <li>Captured network entries: {workspaceNetworkLogs.length}</li>
+                      </ul>
+                    </article>
+                  </div>
+                )}
+
+                {devTracePane === 'issues' && (
+                  <div style="display:flex;flex-direction:column;gap:12px;">
+                    <article class="card devtrace-root-cause">
+                      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+                        <h3 style="margin:0;">Root-cause summary</h3>
+                        <span class={`badge ${rootCauseSummary.confidence === 'high' ? 'badge-success' : rootCauseSummary.confidence === 'medium' ? 'badge-warning' : 'badge-muted'}`}>
+                          {rootCauseSummary.verdict.replace('-', ' ')} · {rootCauseSummary.confidence} confidence
+                        </span>
+                      </div>
+                      <p class="section-subtitle" style="margin:8px 0 0;">{rootCauseSummary.summary}</p>
+                      <ul class="devtrace-list" style="margin-top:12px;">
+                        {rootCauseSummary.recommendations.map((item) => <li key={item}>{item}</li>)}
+                      </ul>
+                    </article>
+
+                    <div class="devtrace-issues">
+                      {diagnosticIssues.map((issue) => (
+                        <article key={issue.id} class={`card devtrace-issue devtrace-issue--${issue.severity}`}>
+                          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+                            <strong>{issue.title}</strong>
+                            <span class={`badge ${issue.severity === 'critical' ? 'badge-danger' : issue.severity === 'warning' ? 'badge-warning' : 'badge-muted'}`}>
+                              {issue.count}
+                            </span>
+                          </div>
+                          <p class="section-subtitle" style="margin:8px 0 0;">{issue.detail}</p>
+                          <div style="margin-top:10px;display:flex;justify-content:space-between;align-items:center;gap:8px;">
+                            <span class="text-caption">Priority score: {issue.score}</span>
+                            <button class="btn btn-outline" onClick={() => openIssueTarget(issue)}>Open relevant panel</button>
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {devTracePane === 'timeline' && (
+                  <div class="devtools-table-container">
+                    <table class="devtools-table">
+                      <thead>
+                        <tr>
+                          <th>Status</th>
+                          <th>Source</th>
+                          <th>Message</th>
+                          <th>Time</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {traceRows.map((row) => {
+                          if (row.type === 'step') {
+                            const step = row.step;
+                            return (
+                              <tr key={row.id}>
+                                <td colSpan={4}>
+                                  <details
+                                    id={`dev-step-${step.step.index}`}
+                                    class="dev-step-accordion"
+                                    open={pendingTraceStepIndexRef.current === step.step.index}
+                                  >
+                                    <summary>Step: {stepLabel(step.step)} (Click to view screenshots)</summary>
+                                    <div style="padding:12px;display:flex;flex-direction:column;gap:10px;">
+                                      {step.afterScreenshotUrl ? (
+                                        <div class="step-screenshots-row">
+                                          <div class="step-screenshot-container">
+                                            {step.beforeScreenshotUrl && (
+                                              <AnnotatableScreenshot
+                                                src={step.beforeScreenshotUrl}
+                                                alt="Before"
+                                                target="before"
+                                                pins={screenshotPins(step.step, 'before')}
+                                                highlightRect={beforeHighlightRect(step.step)}
+                                                maxChars={MAX_ENTRY_CHARS}
+                                                readOnly
+                                              />
+                                            )}
+                                          </div>
+                                          <div style="color:var(--fg-muted);font-weight:700">-&gt;</div>
+                                          <div class="step-screenshot-container">
                                             <AnnotatableScreenshot
-                                              src={step.beforeScreenshotUrl}
-                                              alt="Before"
-                                              target="before"
-                                              pins={screenshotPins(step.step, 'before')}
-                                              highlightRect={beforeHighlightRect(step.step)}
+                                              src={step.afterScreenshotUrl}
+                                              alt="After"
+                                              target="after"
+                                              pins={screenshotPins(step.step, 'after')}
                                               maxChars={MAX_ENTRY_CHARS}
                                               readOnly
                                             />
-                                          )}
+                                          </div>
                                         </div>
-                                        <div style="color:var(--fg-muted);font-weight:700">-&gt;</div>
-                                        <div class="step-screenshot-container">
-                                          <AnnotatableScreenshot
-                                            src={step.afterScreenshotUrl}
-                                            alt="After"
-                                            target="after"
-                                            pins={screenshotPins(step.step, 'after')}
-                                            maxChars={MAX_ENTRY_CHARS}
-                                            readOnly
-                                          />
+                                      ) : step.beforeScreenshotUrl ? (
+                                        <AnnotatableScreenshot
+                                          src={step.beforeScreenshotUrl}
+                                          alt="Step screenshot"
+                                          target="before"
+                                          pins={screenshotPins(step.step, 'before')}
+                                          highlightRect={beforeHighlightRect(step.step)}
+                                          maxChars={MAX_ENTRY_CHARS}
+                                          readOnly
+                                        />
+                                      ) : (
+                                        <div class="text-muted">No screenshot available</div>
+                                      )}
+                                      {normalizeStepBugs(step.step).map((bug) => (
+                                        <div key={bug.id} class="bug-panel">
+                                          {bug.description || 'Bug flagged without description.'}
                                         </div>
-                                      </div>
-                                    ) : step.beforeScreenshotUrl ? (
-                                      <AnnotatableScreenshot
-                                        src={step.beforeScreenshotUrl}
-                                        alt="Step screenshot"
-                                        target="before"
-                                        pins={screenshotPins(step.step, 'before')}
-                                        highlightRect={beforeHighlightRect(step.step)}
-                                        maxChars={MAX_ENTRY_CHARS}
-                                        readOnly
-                                      />
-                                    ) : (
-                                      <div style="color:var(--fg-muted)">No screenshot available</div>
-                                    )}
-                                    {normalizeStepBugs(step.step).map((bug) => (
-                                      <div key={bug.id} class="bug-panel">
-                                        {bug.description || 'Bug flagged without description.'}
-                                      </div>
-                                    ))}
-                                  </div>
-                                </details>
-                              </td>
-                            </tr>
-                          );
-                        }
+                                      ))}
+                                    </div>
+                                  </details>
+                                </td>
+                              </tr>
+                            );
+                          }
 
-                        if (row.type === 'console') {
+                          if (row.type === 'signal') {
+                            const statusClass = row.signal.level === 'critical'
+                              ? 'critical'
+                              : row.signal.level === 'warning'
+                                ? 'warning'
+                                : 'success';
+                            return (
+                              <tr key={row.id} class={`devtools-row ${row.signal.level === 'warning' ? 'warning' : ''} ${row.signal.level === 'critical' ? 'critical' : ''}`}>
+                                <td><span class={`dev-log-status ${statusClass}`}>{row.signal.level.toUpperCase()}</span></td>
+                                <td>{row.signal.source}</td>
+                                <td>{row.signal.message}</td>
+                                <td>{formatClock(row.signal.ts)}</td>
+                              </tr>
+                            );
+                          }
+
+                          if (row.type === 'net-phase') {
+                            const eventStatus = row.event.statusCode ?? (row.event.phase === 'error' ? 0 : undefined);
+                            const severity = eventStatus === undefined ? 'success' : networkStatusClass(eventStatus);
+                            return (
+                              <tr key={row.id} class={`devtools-row ${severity === 'warning' ? 'warning' : ''} ${severity === 'critical' ? 'critical' : ''}`}>
+                                <td><span class={`dev-log-status ${severity}`}>{eventStatus ?? '—'}</span></td>
+                                <td>{`${row.event.method} ${row.event.phase.toUpperCase()}`}</td>
+                                <td>{`${resourceTypeLabel(normalizeResourceType(row.event.resourceType))} · ${endpointForLog(row.event.url)}`}</td>
+                                <td>{formatClock(row.event.ts)}</td>
+                              </tr>
+                            );
+                          }
+
+                          if (row.type === 'console') {
+                            return (
+                              <tr key={row.id} class={`devtools-row ${row.level === 'error' ? 'critical' : 'warning'}`}>
+                                <td><span class={`dev-log-status ${row.level === 'error' ? 'critical' : 'warning'}`}>{row.level.toUpperCase()}</span></td>
+                                <td>CONSOLE</td>
+                                <td>{row.message}</td>
+                                <td>{formatClock(row.ts)}</td>
+                              </tr>
+                            );
+                          }
+
+                          const severity = networkStatusClass(row.log.status);
                           return (
-                            <tr key={row.id} class={`devtools-row ${row.level === 'error' ? 'critical' : 'warning'}`}>
-                              <td><span class={`dev-log-status ${row.level === 'error' ? 'critical' : 'warning'}`}>{row.level.toUpperCase()}</span></td>
-                              <td>CONSOLE</td>
-                              <td>{row.message}</td>
-                              <td>{formatClock(row.ts)}</td>
+                            <tr
+                              key={row.id}
+                              class={`devtools-row ${severity === 'warning' ? 'warning' : ''} ${severity === 'critical' ? 'critical' : ''} ${selectedLogId === row.log.id ? 'selected' : ''}`}
+                              role="button"
+                              tabIndex={0}
+                              aria-label={`${row.log.method} ${endpointForLog(row.log.url)} status ${row.log.status || 'error'}`}
+                              onKeyDown={(event) => {
+                                if (!isKeyboardActivationKey(event.key)) return;
+                                event.preventDefault();
+                                setSelectedLogId(row.log.id);
+                                setInspectorTab('summary');
+                              }}
+                              onClick={() => {
+                                setSelectedLogId(row.log.id);
+                                setInspectorTab('summary');
+                                setDevTracePane('network');
+                              }}
+                            >
+                              <td><span class={`dev-log-status ${severity}`}>{row.log.status || 'ERR'}</span></td>
+                              <td>{row.log.method}</td>
+                              <td>{endpointForLog(row.log.url)}</td>
+                              <td>{formatClock(row.log.timestamp)}</td>
                             </tr>
                           );
-                        }
-
-                        const severity = networkStatusClass(row.log.status);
-                        return (
-                          <tr
-                            key={row.id}
-                            class={`devtools-row ${severity === 'warning' ? 'warning' : ''} ${severity === 'critical' ? 'critical' : ''} ${selectedLogId === row.log.id ? 'selected' : ''}`}
-                            role="button"
-                            tabIndex={0}
-                            aria-label={`${row.log.method} ${endpointForLog(row.log.url)} status ${row.log.status || 'error'}`}
-                            onKeyDown={(event) => {
-                              if (!isKeyboardActivationKey(event.key)) return;
-                              event.preventDefault();
-                              setSelectedLogId(row.log.id);
-                              setInspectorTab('headers');
-                            }}
-                            onClick={() => {
-                              setSelectedLogId(row.log.id);
-                              setInspectorTab('headers');
-                            }}
-                          >
-                            <td><span class={`dev-log-status ${severity}`}>{row.log.status || 'ERR'}</span></td>
-                            <td>{row.log.method}</td>
-                            <td>{endpointForLog(row.log.url)}</td>
-                            <td>{formatClock(row.log.timestamp)}</td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-
-                <div class="payload-inspector">
-                  <div class="inspector-tabs">
-                    <button class={`inspector-tab ${inspectorTab === 'headers' ? 'active' : ''}`} onClick={() => setInspectorTab('headers')}>
-                      Request Headers
-                    </button>
-                    <button class={`inspector-tab ${inspectorTab === 'payload' ? 'active' : ''}`} onClick={() => setInspectorTab('payload')}>
-                      Payload/Body
-                    </button>
-                    <button class={`inspector-tab ${inspectorTab === 'response' ? 'active' : ''}`} onClick={() => setInspectorTab('response')}>
-                      Response
-                    </button>
+                        })}
+                      </tbody>
+                    </table>
                   </div>
-                  <div class="json-viewer-container">
-                    <button class="copy-btn" onClick={() => void copyInspectorPayload()}>
-                      {copyFeedback ? 'Copied!' : 'Copy'}
-                    </button>
-                    <pre class="json-viewer">{inspectorPayload}</pre>
-                  </div>
-                </div>
+                )}
               </section>
             )}
           </>
         )}
       </main>
       <div class={`bflow-dropzone ${isBflowDragging ? 'dragging' : ''}`}>
-        <div class="bflow-drop-text">Drop .bflow file to import</div>
+        <div class="bflow-drop-text">Drop a .bflow file to import</div>
       </div>
       </div>
-    {modalState && (
-      <Modal
-        title={modalState.title}
-        body={modalState.body}
-        inputPlaceholder={modalState.inputPlaceholder}
-        inputValue={modalState.inputValue}
-        isDanger={modalState.isDanger}
-        onCancel={() => setModalState(null)}
-        onConfirm={async (value) => {
-          await modalState.onConfirm(value);
-        }}
-      />
-    )}
-    <ExportModal
-      context={exportModalContext}
-      isOpen={isExportModalOpen}
-      selectedFormat={selectedExportFormat}
-      selectionMode={sessionSelectionMode}
-      canUseSelectedRun={canUseSelectedRun}
-      canUseLatestRun={canUseLatestRun}
-      hasAnyExportableData={hasAnyExportableData}
-      preflight={exportPreflight}
-      isPreflighting={isExportPreflighting}
-      isExporting={isAnyExportRunning}
-      isCopyingEvidence={isCopyingEvidence}
-      exportStatusText={exportStatusText}
-      onSelectFormat={handleExportFormatChange}
-      onSelectMode={handleExportModeChange}
-      onConfirm={() => {
-        void runUnifiedExport(selectedExportFormat);
-      }}
-      onCopyEvidence={() => {
-        void handleCopyEvidence();
-      }}
-      canCopyEvidence={exportModalContext === 'feature' ? hasAnyExportableData : Boolean(activeSession)}
-      onClose={() => {
-        if (isAnyExportRunning || isCopyingEvidence) return;
-        setIsExportModalOpen(false);
-      }}
-    />
-    <PricingModal
-      isOpen={routeView === 'pricing'}
-      onClose={closePricing}
-      onNavigateWelcome={navigateToWelcome}
-      onAuthSuccess={() => {
-        void refreshAuthStatus(false);
-        navigateToView('dashboard', 'replace');
-      }}
-      onAuthStatusChange={(status) => {
-        setAuthStatus(status);
-        setAuthLoading(false);
-      }}
-      runtimeMessage={runtimeMessage}
-    />
-    {toastStack}
+    {globalOverlays}
     </>
   );
 }

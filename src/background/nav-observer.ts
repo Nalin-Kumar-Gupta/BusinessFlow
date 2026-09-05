@@ -4,17 +4,18 @@ import { redactUrl, urlMatchesScope } from '../core/url.js';
 import { appendEvent } from '../storage/db.js';
 import { getActiveSessionId, getScopeOrigins, nextSeq } from '../storage/session-state.js';
 import { requestCapture } from './screenshot.js';
-import { resetTabApiShotBudget } from './net-observer.js';
+import { resetTabApiShotBudget, getInFlightRequestCount } from './net-observer.js';
 import { incrementCounter } from './session.js';
 import {
   getClickContextForTab,
+  isActiveStepForTab,
   markStepAwaitingNav,
   clearStepNavPending,
   isScriptableUrl,
-  skipAfterCaptureIfSameUrl,
 } from './content-events.js';
+import { evaluateAfterCaptureDecision, markAfterQueued } from './after-capture-policy.js';
 
-const CLICK_CAUSED_NAV_WINDOW_MS = 750;
+const CLICK_CAUSED_NAV_WINDOW_MS = 1200;
 
 // Phase 1: navigation-settled (handles multi-hop redirects like SSO/SAML).
 // Wait until onCompleted has been quiet for NAV_QUIET_MS on the tab. Each
@@ -33,6 +34,9 @@ const POST_NAV_POLL_MS = 200;
 // fixed wait — enough for React/Vue/Angular to render the new route + first
 // data fetch, but not so long that the after-frame lags visibly.
 const SPA_ROUTE_RENDER_MS = 1200;
+const AFTER_NETWORK_QUIET_MS = 260;
+const AFTER_NETWORK_MAX_WAIT_MS = 1400;
+const AFTER_NETWORK_POLL_MS = 80;
 
 // Persistent per-tab tracking of the last webNavigation.onCompleted timestamp.
 // Populated by a top-level listener attached in attachNavListeners so
@@ -141,7 +145,7 @@ async function handleNavCommitted(d: chrome.webNavigation.FrameNavDetails, isSpa
           tabId: d.tabId, stepId: ctx.stepId, sinceClickMs: sinceClick, destination: d.url,
         });
         markStepAwaitingNav(ctx.stepId);
-        void awaitSpaRenderAndCapture(sessionId, d.tabId, ctx.stepId, d.url);
+        void awaitSpaRenderAndCapture(sessionId, d.tabId, ctx.stepId, d.url, ctx.generation ?? 0);
         return; // don't fire the standard nav screenshot — the SPA after-frame handles it
       }
     }
@@ -221,7 +225,7 @@ async function handleBeforeNavigate(
   });
 
   markStepAwaitingNav(ctx.stepId);
-  void awaitNavAndCapture(sessionId, d.tabId, ctx.stepId, d.url);
+  void awaitNavAndCapture(sessionId, d.tabId, ctx.stepId, d.url, ctx.clickTs, ctx.generation ?? 0);
 }
 
 // Primitive 1: navigation-settled — waits for onCompleted to be quiet for
@@ -231,15 +235,16 @@ async function handleBeforeNavigate(
 // Aborts early if the tab is closed.
 async function waitForNavigationSettled(
   tabId: number,
+  minCompletedAfterTs: number,
 ): Promise<'settled' | 'timeout' | 'tab-closed'> {
   const started = Date.now();
-  let anySeen = lastOnCompletedAtByTab.has(tabId);
+  let anySeen = false;
 
   while (Date.now() - started < NAV_MAX_WAIT_MS) {
     if (closedTabIds.has(tabId)) return 'tab-closed';
 
     const lastCompleted = lastOnCompletedAtByTab.get(tabId);
-    if (lastCompleted !== undefined) {
+    if (lastCompleted !== undefined && lastCompleted >= minCompletedAfterTs) {
       anySeen = true;
       const quietFor = Date.now() - lastCompleted;
       if (quietFor >= NAV_QUIET_MS) return 'settled';
@@ -289,14 +294,44 @@ async function getTabUrlSafe(tabId: number): Promise<string | undefined> {
   }
 }
 
+async function waitForNetworkQuietOnTab(tabId: number): Promise<{ quiet: boolean; waitedMs: number }> {
+  const started = Date.now();
+  let zeroSince: number | null = null;
+
+  while (Date.now() - started < AFTER_NETWORK_MAX_WAIT_MS) {
+    const inFlight = getInFlightRequestCount(tabId);
+    if (inFlight === 0) {
+      zeroSince ??= Date.now();
+      if (Date.now() - zeroSince >= AFTER_NETWORK_QUIET_MS) {
+        return { quiet: true, waitedMs: Date.now() - started };
+      }
+    } else {
+      zeroSince = null;
+    }
+    await new Promise<void>((r) => setTimeout(r, AFTER_NETWORK_POLL_MS));
+  }
+
+  return { quiet: false, waitedMs: Date.now() - started };
+}
+
 async function awaitNavAndCapture(
   sessionId: string,
   tabId: number,
   stepId: string,
   destinationUrl: string,
+  clickTs: number,
+  generation: number,
 ): Promise<void> {
   try {
-    const navResult = await waitForNavigationSettled(tabId);
+    if (!isActiveStepForTab(tabId, stepId, generation)) {
+      console.log('[TestTrace] nav-aware after-frame skipped — stale step replaced by newer click', {
+        tabId,
+        staleStepId: stepId,
+      });
+      return;
+    }
+
+    const navResult = await waitForNavigationSettled(tabId, clickTs);
     if (navResult === 'tab-closed') {
       console.warn('[TestTrace] nav-aware after-frame aborted: tab closed', { tabId, stepId });
       return;
@@ -318,12 +353,16 @@ async function awaitNavAndCapture(
     // Prefer the tab's live URL so redirect chains are attributed correctly.
     const finalUrl = (await getTabUrlSafe(tabId)) ?? destinationUrl;
 
-    const skipped = await skipAfterCaptureIfSameUrl(sessionId, stepId, tabId, finalUrl);
-    if (skipped) {
-      console.log('[TestTrace] nav-aware after-frame skipped (same URL as before)', {
+    const decision = await evaluateAfterCaptureDecision(sessionId, stepId, tabId, finalUrl, {
+      navConfirmed: true,
+      hasDomChangeSignal: false,
+    });
+    if (!decision.shouldCapture) {
+      console.log('[TestTrace] nav-aware after-frame skipped', {
         tabId,
         stepId,
         finalUrl,
+        reason: decision.reason,
       });
       return;
     }
@@ -331,6 +370,8 @@ async function awaitNavAndCapture(
     console.log('[TestTrace] nav-aware after-frame: capturing', {
       tabId, stepId, nav: navResult, paint: paintResult, finalUrl,
     });
+
+    const networkQuiet = await waitForNetworkQuietOnTab(tabId);
 
     void requestCapture({
       sessionId,
@@ -341,8 +382,9 @@ async function awaitNavAndCapture(
       explicitTabTarget: true,
       priority: 'normal',
       pageUrl: finalUrl,
-      note: `nav:${navResult} paint:${paintResult}`,
+      note: `after_settle:${decision.reason} nav:${navResult} paint:${paintResult} networkQuiet:${networkQuiet.quiet ? 'yes' : 'timeout'} waitMs:${networkQuiet.waitedMs}`,
     });
+    await markAfterQueued(stepId, decision.reason);
   } finally {
     clearStepNavPending(stepId);
   }
@@ -355,19 +397,34 @@ async function awaitSpaRenderAndCapture(
   tabId: number,
   stepId: string,
   destinationUrl: string,
+  generation: number,
 ): Promise<void> {
   try {
-    await new Promise<void>((r) => setTimeout(r, SPA_ROUTE_RENDER_MS));
-    const finalUrl = (await getTabUrlSafe(tabId)) ?? destinationUrl;
-    const skipped = await skipAfterCaptureIfSameUrl(sessionId, stepId, tabId, finalUrl);
-    if (skipped) {
-      console.log('[TestTrace] SPA after-frame skipped (same URL as before)', {
+    if (!isActiveStepForTab(tabId, stepId, generation)) {
+      console.log('[TestTrace] SPA after-frame skipped — stale step replaced by newer click', {
         tabId,
-        stepId,
-        finalUrl,
+        staleStepId: stepId,
       });
       return;
     }
+
+    await new Promise<void>((r) => setTimeout(r, SPA_ROUTE_RENDER_MS));
+    const finalUrl = (await getTabUrlSafe(tabId)) ?? destinationUrl;
+    const decision = await evaluateAfterCaptureDecision(sessionId, stepId, tabId, finalUrl, {
+      navConfirmed: true,
+      hasDomChangeSignal: false,
+    });
+    if (!decision.shouldCapture) {
+      console.log('[TestTrace] SPA after-frame skipped', {
+        tabId,
+        stepId,
+        finalUrl,
+        reason: decision.reason,
+      });
+      return;
+    }
+
+    const networkQuiet = await waitForNetworkQuietOnTab(tabId);
 
     void requestCapture({
       sessionId,
@@ -378,8 +435,9 @@ async function awaitSpaRenderAndCapture(
       explicitTabTarget: true,
       priority: 'normal',
       pageUrl: finalUrl,
-      note: 'SPA route render-stabilized after-frame',
+      note: `after_settle:${decision.reason} networkQuiet:${networkQuiet.quiet ? 'yes' : 'timeout'} waitMs:${networkQuiet.waitedMs}`,
     });
+    await markAfterQueued(stepId, decision.reason);
   } finally {
     clearStepNavPending(stepId);
   }
@@ -425,5 +483,5 @@ async function handleCreatedNavigationTarget(
 
   markStepAwaitingNav(ctx.stepId);
   // Redirect the after-frame to the NEW tab, not the original opener.
-  void awaitNavAndCapture(sessionId, d.tabId, ctx.stepId, d.url);
+  void awaitNavAndCapture(sessionId, d.tabId, ctx.stepId, d.url, ctx.clickTs, ctx.generation ?? 0);
 }

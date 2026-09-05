@@ -282,7 +282,7 @@ function App(): JSX.Element {
     downloadBusinessFlowReport(html);
   };
 
-  if (loading) return <div class="report-state">Loading report workspace...</div>;
+  if (loading) return <div class="report-state">Loading report workspace…</div>;
   if (!session) return <div class="report-state">No sessions available yet.</div>;
 
   return (

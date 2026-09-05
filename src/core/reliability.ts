@@ -17,6 +17,15 @@ export interface RecordingIntegritySummary {
   stepsMissingAfter: number;
 }
 
+export interface AfterCoverageSummary {
+  eligible: number;
+  captured: number;
+  skipped: number;
+  canceled: number;
+  missing: number;
+  coveragePct: number;
+}
+
 export function summarizeRecordingIntegrity(
   events: readonly TestEvent[],
   steps: readonly Step[],
@@ -66,6 +75,43 @@ export function summarizeRecordingIntegrity(
     stepsMissingBefore,
     stepsMissingAfter,
   };
+}
+
+export function summarizeAfterCoverage(steps: readonly Step[]): AfterCoverageSummary {
+  let eligible = 0;
+  let captured = 0;
+  let skipped = 0;
+  let canceled = 0;
+
+  for (const step of steps) {
+    if (!step.beforeEvidenceEventId) continue;
+    if (step.stepState === 'BEFORE_FAILED') continue;
+    eligible += 1;
+
+    if (step.afterEvidenceEventId) {
+      captured += 1;
+      continue;
+    }
+
+    if (step.stepState === 'AFTER_CANCELED') {
+      canceled += 1;
+      continue;
+    }
+
+    if (step.noChangeDetected || step.stepState === 'AFTER_SKIPPED') {
+      skipped += 1;
+    }
+  }
+
+  const resolved = captured + skipped + canceled;
+  const missing = Math.max(eligible - resolved, 0);
+  const coveragePct = eligible === 0 ? 100 : (resolved / eligible) * 100;
+
+  return { eligible, captured, skipped, canceled, missing, coveragePct };
+}
+
+export function meetsAfterCoverageSlo(summary: AfterCoverageSummary, minCoveragePct = 98): boolean {
+  return summary.coveragePct >= minCoveragePct;
 }
 
 export function hasEvidenceIntegrityRisk(summary: RecordingIntegritySummary): boolean {

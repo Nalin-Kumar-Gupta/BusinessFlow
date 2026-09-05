@@ -15,6 +15,8 @@ No archaeology required. Start here.
   - Export pipeline: storage → canonical model → PDF/Word/Excel/clipboard
 - [`dev-workflow.md`](./dev-workflow.md)
   - Day-to-day setup, build/test loop, local backend + extension workflow
+- [`chrome-web-store-release.md`](./chrome-web-store-release.md)
+  - CWS release checklist, permission rationale, smoke-test gates
 
 ## Grounding policy
 

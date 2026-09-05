@@ -134,6 +134,13 @@ export function createPageObservers(deps: PageObserverDeps): PageObservers {
 
       const clickCorrelationId = newClickCorrelationId();
       const clickTs = Date.now();
+      console.log('[TestTrace] click->capture pipeline: user_click emit', {
+        clickCorrelationId,
+        eventType: e.type,
+        tag,
+        selector,
+        pageUrl: location.href,
+      });
 
       safeSendContentEvent({
         kind: 'user_click',
@@ -254,6 +261,11 @@ export function createPageObservers(deps: PageObserverDeps): PageObservers {
       timer: setTimeout(() => flushAfterCapture('stabilized'), AFTER_STABILIZE_MS),
       hardTimer: setTimeout(() => flushAfterCapture('hard-timeout'), AFTER_HARD_TIMEOUT_MS),
     };
+    console.log('[TestTrace] click->capture pipeline: after timer armed', {
+      clickCorrelationId,
+      stabilizeMs: AFTER_STABILIZE_MS,
+      hardTimeoutMs: AFTER_HARD_TIMEOUT_MS,
+    });
   }
 
   function resetAfterCaptureTimer(): void {
@@ -280,6 +292,13 @@ export function createPageObservers(deps: PageObserverDeps): PageObservers {
 
     clearTimeout(pending.timer);
     clearTimeout(pending.hardTimer);
+
+    console.log('[TestTrace] click->capture pipeline: after timer flush', {
+      clickCorrelationId: pending.clickCorrelationId,
+      reason,
+      elapsedMs: Date.now() - pending.startedAt,
+      majorShiftResets: pending.majorShiftResets,
+    });
 
     safeSendContentEvent({
       kind: 'user_action_stable',

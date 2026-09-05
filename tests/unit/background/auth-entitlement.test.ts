@@ -88,6 +88,20 @@ function setupHarness() {
       return new Response(JSON.stringify({ success: true, data: { loggedOut: true } }), { status: 200 });
     }
 
+    if (url.endsWith('/api/v1/auth/forgot-password')) {
+      const body = JSON.parse(String(init?.body || '{}')) as { email?: string };
+      if (!body.email) {
+        return new Response(JSON.stringify({ success: false, error: { message: 'email is required' } }), { status: 422 });
+      }
+      return new Response(JSON.stringify({
+        success: true,
+        data: {
+          accepted: true,
+          message: 'If that email exists, a reset link has been sent.',
+        },
+      }), { status: 200 });
+    }
+
     if (url.endsWith('/api/v1/entitlement')) {
       if (unauthorized) {
         return new Response(JSON.stringify({ success: false, error: { message: 'unauthorized' } }), { status: 401 });
@@ -186,6 +200,13 @@ describe('extension auth entitlement manager', () => {
     const status = await h.manager.signUp('new@businessflow.dev', 'Password123!');
     expect(status.signedIn).toBe(true);
     expect(status.state).toBe('access_active');
+  });
+
+  it('supports requesting password reset with generic success response', async () => {
+    const h = setupHarness();
+    const response = await h.manager.requestPasswordReset('new@businessflow.dev');
+    expect(response.accepted).toBe(true);
+    expect(response.message).toContain('If that email exists');
   });
 
   it('supports logout cleanly', async () => {

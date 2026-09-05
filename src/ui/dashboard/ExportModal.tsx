@@ -8,13 +8,12 @@ import {
 } from './export-ux.js';
 import type {
   ExportFormat,
+  ExportModalContext,
   ExportPreflightSummary,
   SessionSelectionMode,
 } from './export-ux.js';
 
 const FOCUSABLE_SELECTOR = 'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
-
-export type ExportModalContext = 'feature' | 'test-case';
 
 export interface ExportModalProps {
   context: ExportModalContext;
@@ -107,6 +106,8 @@ export function ExportModal({
   const selectedDefinition = EXPORT_FORMATS.find((option) => option.format === selectedFormat) || EXPORT_FORMATS[0]!;
   const isFeatureContext = context === 'feature';
   const sessionScoped = isFormatSessionScoped(selectedFormat);
+  const reportFormats = EXPORT_FORMATS.filter((option) => option.scopeLabel === 'Run export');
+  const archiveFormats = EXPORT_FORMATS.filter((option) => option.scopeLabel === 'Feature archive');
 
   const noValidRun = sessionScoped && (
     isFeatureContext
@@ -128,45 +129,83 @@ export function ExportModal({
         tabIndex={-1}
         onClick={(event) => event.stopPropagation()}
       >
-        <div id={titleIdRef.current} class="modal-title">{isFeatureContext ? 'Export feature report' : 'Export test case report'}</div>
+        <div id={titleIdRef.current} class="modal-title">{isFeatureContext ? 'Feature exports' : 'Test case exports'}</div>
         <div id={bodyIdRef.current} class="modal-body">
           {isFeatureContext
-            ? 'Export this feature with latest run per test case (default) or all runs from advanced options.'
-            : 'Export this test case with selected run (default) or latest run from advanced options.'}
+            ? 'Copy evidence for tickets and chat first, then download reports or a full .bflow archive.'
+            : 'Copy evidence for tickets and chat first, then download your report.'}
         </div>
 
-        <div class="export-copy-evidence-row">
-            <button class="btn btn-primary" onClick={onCopyEvidence} disabled={isCopyingEvidence || isExporting || !canCopyEvidence}>
-              {isCopyingEvidence ? 'Copying evidence…' : (context === 'feature' ? 'Copy feature summary' : 'Copy evidence')}
-            </button>
-            <p class="export-copy-evidence-help">
-              {context === 'feature'
-                ? 'Copy feature summary, test-case matrix, findings, and representative screenshots.'
-                : 'Copy test result, relevant steps, findings and screenshots.'}
-            </p>
+        <section class="export-copy-evidence-row" aria-label="Quick share">
+          <div class="export-copy-evidence-top">
+            <strong>1) Copy Evidence</strong>
+            <span class="badge badge-success">Fastest</span>
           </div>
+          <p class="export-copy-evidence-help">
+            {context === 'feature'
+              ? 'Copies a feature summary with per-test-case results, top findings, and representative screenshots.'
+              : 'Copies test details, result, key steps, findings, technical evidence, and relevant screenshots.'}
+          </p>
+          <button class="btn btn-primary export-copy-btn" onClick={onCopyEvidence} disabled={isCopyingEvidence || isExporting || !canCopyEvidence}>
+            {isCopyingEvidence ? 'Copying evidence…' : (context === 'feature' ? 'Copy feature evidence' : 'Copy evidence')}
+          </button>
+        </section>
 
-        <div class="export-format-list" role="radiogroup" aria-label="Export format">
-          {EXPORT_FORMATS.map((option) => (
-            <label key={option.format} class={`export-format-card ${selectedFormat === option.format ? 'selected' : ''}`}>
-              <input
-                type="radio"
-                name="export-format"
-                checked={selectedFormat === option.format}
-                onChange={() => onSelectFormat(option.format)}
-              />
-              <div class="export-format-card-main">
-                <div class="export-format-card-top">
-                  <strong>{option.label}</strong>
-                  {option.recommendedForMostTesters && <span class="badge badge-muted">Recommended</span>}
+        <section class="export-section" aria-label="Download reports">
+          <div class="export-section-head">
+            <strong>2) Download reports</strong>
+            <span class="export-section-subtle">PDF, Word, and Excel for sharing or triage</span>
+          </div>
+          <div class="export-format-list" role="radiogroup" aria-label="Report format">
+            {reportFormats.map((option) => (
+              <label key={option.format} class={`export-format-card ${selectedFormat === option.format ? 'selected' : ''} ${option.format === 'pdf' ? 'priority' : ''}`}>
+                <input
+                  type="radio"
+                  name="export-format"
+                  checked={selectedFormat === option.format}
+                  onChange={() => onSelectFormat(option.format)}
+                />
+                <div class="export-format-card-main">
+                  <div class="export-format-card-top">
+                    <strong>{option.label}</strong>
+                    {option.recommendedForMostTesters && <span class="badge badge-muted">Recommended</span>}
+                  </div>
+                  <div class="export-format-help">{option.shortHelp}</div>
+                  <div class="export-format-meta">Contains: {option.containsLabel}</div>
+                  <div class="export-format-meta">Scope: {option.scopeLabel}</div>
                 </div>
-                <div class="export-format-help">{option.shortHelp}</div>
-                <div class="export-format-meta">Contains: {option.containsLabel}</div>
-                <div class="export-format-meta">Scope: {option.scopeLabel}</div>
-              </div>
-            </label>
-          ))}
-        </div>
+              </label>
+            ))}
+          </div>
+        </section>
+
+        {isFeatureContext && archiveFormats.length > 0 && (
+          <section class="export-section export-section-archive" aria-label="Portability archive">
+            <div class="export-section-head">
+              <strong>3) Portability</strong>
+              <span class="export-section-subtle">Use only when you need full re-importable data</span>
+            </div>
+            <div class="export-format-list export-format-list--archive" role="radiogroup" aria-label="Archive format">
+              {archiveFormats.map((option) => (
+                <label key={option.format} class={`export-format-card ${selectedFormat === option.format ? 'selected' : ''}`}>
+                  <input
+                    type="radio"
+                    name="export-format"
+                    checked={selectedFormat === option.format}
+                    onChange={() => onSelectFormat(option.format)}
+                  />
+                  <div class="export-format-card-main">
+                    <div class="export-format-card-top">
+                      <strong>{option.label}</strong>
+                    </div>
+                    <div class="export-format-help">{option.shortHelp}</div>
+                    <div class="export-format-meta">Contains: {option.containsLabel}</div>
+                  </div>
+                </label>
+              ))}
+            </div>
+          </section>
+        )}
 
         <details class="export-advanced" open={false}>
           <summary>Advanced options</summary>
@@ -223,6 +262,7 @@ export function ExportModal({
             </fieldset>
 
             <div class="export-copy-note">{formatScopeCopy(selectedFormat)}</div>
+            <div class="export-copy-note">Copy Evidence writes rich HTML + Markdown text when possible; fallback is Markdown text.</div>
             <div class="export-copy-note">
               Privacy note: exports can include screenshots, URLs, and diagnostic text. Review before sharing externally.
             </div>
@@ -254,7 +294,7 @@ export function ExportModal({
           {noValidRun && sessionScoped && <p class="export-warning">No data available for the selected export scope.</p>}
           {canCopyEvidence && (
             <p class="export-copy-note">
-              Tip: use <strong>{context === 'feature' ? 'Copy feature summary' : 'Copy evidence'}</strong> for quick ticket/chat paste.
+              Tip: use <strong>{context === 'feature' ? 'Copy feature evidence' : 'Copy evidence'}</strong> for quick ticket/chat paste.
             </p>
           )}
           {exportStatusText && <p>{exportStatusText}</p>}

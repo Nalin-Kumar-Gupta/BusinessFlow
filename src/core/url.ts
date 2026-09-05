@@ -57,8 +57,17 @@ export function urlMatchesScope(url: string, scopeOrigins: string[]): boolean {
 
 export function originToPattern(origin: string): string {
   if (!origin || origin === 'null') return '';
-  // Converts "https://example.com" to "https://example.com/*"
-  return origin.endsWith('/') ? `${origin}*` : `${origin}/*`;
+
+  try {
+    const url = new URL(origin);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return '';
+
+    // Chrome host permission patterns do not support explicit ports.
+    // Normalize localhost:3000 -> localhost so dev setups stop failing contains/request checks.
+    return `${url.protocol}//${url.hostname}/*`;
+  } catch {
+    return '';
+  }
 }
 
 export function extractOrigin(url: string): string {

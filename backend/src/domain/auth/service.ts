@@ -52,6 +52,14 @@ export class AuthService {
     await this.repository.revokeSession(session.id);
   }
 
+  async requestPasswordReset(email: string): Promise<void> {
+    try {
+      await this.provider.requestPasswordReset(email);
+    } catch {
+      // Always return generic success to prevent account enumeration.
+    }
+  }
+
   async requireIdentity(auth: AuthContext): Promise<AuthenticatedIdentity> {
     if (auth.actorType === 'bearer' && auth.bearerToken) {
       let profile;

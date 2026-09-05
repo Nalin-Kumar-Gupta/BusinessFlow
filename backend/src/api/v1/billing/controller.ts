@@ -16,7 +16,7 @@ export async function getBillingCatalog(
   const countryCode = typeof cf?.country === 'string' && cf.country.trim().length > 0
     ? cf.country.trim().toUpperCase()
     : null;
-  const catalog = billingService.getCatalog(countryCode);
+  const catalog = await billingService.getCatalog(countryCode);
   return jsonSuccess(catalog, requestId, 200);
 }
 

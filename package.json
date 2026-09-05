@@ -15,6 +15,7 @@
     "format:check": "prettier --check .",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:reliability-slo": "vitest run tests/unit/background/after-decision.test.ts tests/unit/core/after-coverage-slo.test.ts",
     "fixture": "node fixture/server.mjs",
     "e2e": "playwright test",
     "e2e:ui": "playwright test --ui",

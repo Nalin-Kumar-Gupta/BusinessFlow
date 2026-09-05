@@ -6,6 +6,7 @@ import type { ClipboardEvidenceItem, ClipboardEvidenceViewModel } from './clipbo
 export interface ClipboardRenderResult {
   readonly html: string;
   readonly text: string;
+  readonly markdown: string;
   readonly resolvedImageCount: number;
   readonly missingImageCount: number;
 }
@@ -26,51 +27,52 @@ export function renderClipboardEvidence(
   htmlParts.push('<div>');
   htmlParts.push(`<h2>${escapeHtml(view.reportTitle)}</h2>`);
   htmlParts.push(`<p><strong>Verdict:</strong> ${escapeHtml(view.verdict)}</p>`);
-  textParts.push(view.reportTitle);
-  textParts.push(`Verdict: ${view.verdict}`);
+  textParts.push(`# ${view.reportTitle}`);
+  textParts.push(`**Verdict:** ${view.verdict}`);
 
   if (view.isFeatureScope && view.testCaseResults && view.testCaseResults.length > 0) {
     htmlParts.push('<h3>Test case results</h3><ul>');
     textParts.push('');
-    textParts.push('Test case results:');
+    textParts.push('## Test case results');
     for (const row of view.testCaseResults) {
       htmlParts.push(`<li><strong>${escapeHtml(row.verdict)}</strong> — ${escapeHtml(row.testCase)} (${row.stepCount} steps, ${row.findingsCount} findings)</li>`);
-      textParts.push(`- ${row.verdict} — ${row.testCase} (${row.stepCount} steps, ${row.findingsCount} findings)`);
+      textParts.push(`- **${row.verdict}** — ${row.testCase} (${row.stepCount} steps, ${row.findingsCount} findings)`);
     }
     htmlParts.push('</ul>');
   }
 
   if (view.isNegativeTest) {
     htmlParts.push('<p><em>Negative test context: failing responses may be expected by design for this run.</em></p>');
-    textParts.push('Negative test context: failing responses may be expected by design for this run.');
+    textParts.push('> Negative test context: failing responses may be expected by design for this run.');
   }
 
   if (view.identityRows.length > 0) {
     htmlParts.push('<h3>Test identity</h3><ul>');
     textParts.push('');
-    textParts.push('Test identity:');
+    textParts.push('## Test identity');
     for (const row of view.identityRows) {
       htmlParts.push(`<li><strong>${escapeHtml(row.label)}:</strong> ${escapeHtml(row.value)}</li>`);
-      textParts.push(`- ${row.label}: ${row.value}`);
+      textParts.push(`- **${row.label}:** ${row.value}`);
     }
     htmlParts.push('</ul>');
   }
 
   htmlParts.push(`<p>${escapeHtml(view.summaryLine)}</p>`);
   textParts.push('');
+  textParts.push(`## Summary`);
   textParts.push(view.summaryLine);
 
   if (view.contextLine) {
     htmlParts.push(`<h3>Tester context</h3><p>${escapeHtml(view.contextLine)}</p>`);
     textParts.push('');
-    textParts.push('Tester context:');
+    textParts.push('## Tester context');
     textParts.push(view.contextLine);
   }
 
   if (view.steps.length > 0) {
     htmlParts.push('<h3>Execution steps</h3><ol>');
     textParts.push('');
-    textParts.push('Execution steps:');
+    textParts.push('## Execution steps');
     for (const step of view.steps) {
       const safeAction = redactPotentialUrl(step.action);
       const suffix = step.timestampLabel ? ` <span style="color: #57606a;">(${escapeHtml(step.timestampLabel)})</span>` : '';
@@ -79,7 +81,7 @@ export function renderClipboardEvidence(
       if (step.notes.length > 0) {
         const noteLine = step.notes.map((note) => redactPotentialUrl(note)).join(' | ');
         htmlParts.push(`<div style="margin: 0 0 8px 16px; font-size: 12px; color: #57606a;">Notes: ${escapeHtml(noteLine)}</div>`);
-        textParts.push(`   Notes: ${noteLine}`);
+        textParts.push(`   - Notes: ${noteLine}`);
       }
     }
     htmlParts.push('</ol>');
@@ -88,7 +90,7 @@ export function renderClipboardEvidence(
   if (view.findings.length > 0) {
     htmlParts.push('<h3>Findings</h3><ul>');
     textParts.push('');
-    textParts.push('Findings:');
+    textParts.push('## Findings');
     for (const finding of view.findings) {
       const detail = [
         `${finding.severity.toUpperCase()} — ${redactPotentialUrl(finding.summary)}`,
@@ -100,7 +102,7 @@ export function renderClipboardEvidence(
       if (finding.detail) {
         const safeDetail = redactPotentialUrl(finding.detail);
         htmlParts.push(`<div>${escapeHtml(safeDetail)}</div>`);
-        textParts.push(`  ${safeDetail}`);
+        textParts.push(`  - ${safeDetail}`);
       }
     }
     htmlParts.push('</ul>');
@@ -109,7 +111,7 @@ export function renderClipboardEvidence(
   if (view.testerNotes.length > 0) {
     htmlParts.push('<h3>Tester notes</h3><ul>');
     textParts.push('');
-    textParts.push('Tester notes:');
+    textParts.push('## Tester notes');
     for (const note of view.testerNotes) {
       const safeNote = redactPotentialUrl(note);
       htmlParts.push(`<li>${escapeHtml(safeNote)}</li>`);
@@ -121,7 +123,7 @@ export function renderClipboardEvidence(
   if (view.technicalEvidence.length > 0) {
     htmlParts.push('<h3>Relevant technical evidence</h3><ul>');
     textParts.push('');
-    textParts.push('Relevant technical evidence:');
+    textParts.push('## Relevant technical evidence');
     for (const line of view.technicalEvidence) {
       const safeLine = redactPotentialUrl(line);
       htmlParts.push(`<li>${escapeHtml(safeLine)}</li>`);
@@ -133,7 +135,7 @@ export function renderClipboardEvidence(
   if (view.evidence.length > 0) {
     htmlParts.push('<h3>Relevant screenshots</h3>');
     textParts.push('');
-    textParts.push('Relevant screenshots:');
+    textParts.push('## Relevant screenshots');
     for (const item of view.evidence) {
       const resolved = !item.missing ? resolveDataUrl(item.blobKey) : undefined;
       const annotationLine = item.annotationLines.length > 0
@@ -163,7 +165,7 @@ export function renderClipboardEvidence(
         htmlParts.push(`<img src="${escapeHtml(resolved)}" alt="${escapeHtml(item.label)}"${dimensionAttrs} style="${dimensionStyle} max-width: ${TARGET_IMAGE_WIDTH_PX}px; max-height: ${TARGET_IMAGE_HEIGHT_PX}px; object-fit: contain; display: block; border: 1px solid #d0d7de; border-radius: 4px;" />`);
         if (annotationLine) htmlParts.push(`<div style="font-size: 12px; margin-top: 4px;">${escapeHtml(annotationLine)}</div>`);
         htmlParts.push('</div>');
-        textParts.push(`- ${textLabel} (image attached in rich paste when supported)`);
+        textParts.push(`- ${textLabel} _(embedded in rich paste when destination supports HTML images)_`);
       } else {
         missingImageCount += 1;
         htmlParts.push(`<p><strong>${escapeHtml(stepTitle)}</strong>${captionRole ? ` — ${escapeHtml(captionRole)}` : ''}: screenshot unavailable.</p>`);
@@ -174,9 +176,12 @@ export function renderClipboardEvidence(
 
   htmlParts.push('</div>');
 
+  const markdown = textParts.join('\n');
+
   return {
     html: htmlParts.join(''),
-    text: textParts.join('\n'),
+    text: markdown,
+    markdown,
     resolvedImageCount,
     missingImageCount,
   };

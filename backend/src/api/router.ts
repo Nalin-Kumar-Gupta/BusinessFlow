@@ -8,7 +8,7 @@ import type { BillingService } from '../domain/billing/service.js';
 import type { EntitlementService } from '../domain/entitlement/service.js';
 import { ApiError } from '../errors/api-error.js';
 import { getHealth, postHealth } from './v1/health/controller.js';
-import { login, logout, me, signup, extensionLogin, extensionLogout } from './v1/auth/controller.js';
+import { login, logout, me, signup, extensionLogin, extensionLogout, forgotPassword } from './v1/auth/controller.js';
 import { getAccount } from './v1/account/controller.js';
 import { createCheckout, createCustomerPortal, getBillingCatalog, handlePaddleWebhook } from './v1/billing/controller.js';
 import { getMyEntitlement } from './v1/entitlement/controller.js';
@@ -73,6 +73,10 @@ export async function routeRequest(request: Request, context: RouteContext): Pro
 
   if (url.pathname === `${v1Base}/auth/extension/logout` && request.method === 'POST') {
     return extensionLogout(context.auth, context.services.authService, context.requestId);
+  }
+
+  if (url.pathname === `${v1Base}/auth/forgot-password` && request.method === 'POST') {
+    return forgotPassword(request, context.services.authService, context.requestId);
   }
 
   if (url.pathname === `${v1Base}/account` && request.method === 'GET') {

@@ -7,10 +7,10 @@
 import { render } from 'preact';
 import { useState, useEffect, useCallback, useMemo, useRef } from 'preact/hooks';
 import type { JSX } from 'preact/jsx-runtime';
-import type { Step, EvidenceStoredEvent } from '../../core/types.js';
+import type { EvidenceStoredEvent } from '../../core/types.js';
 import type { AuthStatusPayload } from '../../core/auth.js';
 import { extractOrigin, originToPattern } from '../../core/url.js';
-import { getAllSessions, getBlob, getEventsForSession, getStepsForSession } from '../../storage/db.js';
+import { getAllSessions, getEventsForSession, getStepsForSession } from '../../storage/db.js';
 import { getSettings } from '../../storage/settings.js';
 
 type PanelState = 'loading' | 'no-permission' | 'unsupported' | 'idle' | 'recording' | 'paused';
@@ -25,36 +25,11 @@ interface PendingOriginInfo {
 interface LiveStepCard {
   id: string;
   index: number;
-  title: string;
   ts: number;
-  beforeThumbUrl?: string;
-  afterThumbUrl?: string;
-  hasBefore: boolean;
   hasAfter: boolean;
   noAfterNeeded: boolean;
-  transitionBadge?: string;
   hasHttp500: boolean;
   hasConsoleError: boolean;
-  note?: string;
-}
-
-function buildTransitionBadge(beforeUrl: string | undefined, afterUrl: string | undefined): string | undefined {
-  if (!beforeUrl || !afterUrl) return undefined;
-  try {
-    const before = new URL(beforeUrl);
-    const after = new URL(afterUrl);
-    if (before.origin !== after.origin) {
-      return `Origin changed: ${before.host} -> ${after.host}`;
-    }
-    const beforePath = `${before.pathname}${before.search}${before.hash}`;
-    const afterPath = `${after.pathname}${after.search}${after.hash}`;
-    if (beforePath !== afterPath) {
-      return `Navigated: ${beforePath || '/'} -> ${afterPath || '/'}`;
-    }
-    return undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 // Keys that session-state.ts writes to chrome.storage.local. When these
@@ -65,6 +40,61 @@ const REACTIVE_STORAGE_KEYS = new Set([
   'tt:pendingOrigins',
   'tt:sessionStartedAt',
 ]);
+
+const BROAD_OPTIONAL_ORIGINS = ['<all_urls>'];
+
+async function getActiveTab(): Promise<chrome.tabs.Tab | undefined> {
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  return tabs[0];
+}
+
+async function canScriptTab(tabId: number): Promise<boolean> {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'ISOLATED',
+      func: () => true,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function hasCaptureAccessForOrigin(origin: string): Promise<boolean> {
+  const activeTab = await getActiveTab().catch(() => undefined);
+  if (activeTab?.id && await canScriptTab(activeTab.id)) return true;
+
+  const hasAllUrls = await chrome.permissions.contains({ origins: BROAD_OPTIONAL_ORIGINS }).catch(() => false);
+  if (hasAllUrls) return true;
+
+  const originPattern = originToPattern(origin);
+  if (!originPattern) return false;
+  return chrome.permissions.contains({ origins: [originPattern] }).catch(() => false);
+}
+
+async function ensureCaptureAccessForOrigin(origin: string): Promise<boolean> {
+  if (await hasCaptureAccessForOrigin(origin)) return true;
+
+  const originPattern = originToPattern(origin);
+  if (originPattern) {
+    const grantedOrigin = await chrome.permissions.request({ origins: [originPattern] }).catch(() => false);
+    if (grantedOrigin) return true;
+  }
+
+  const grantedAll = await chrome.permissions.request({ origins: BROAD_OPTIONAL_ORIGINS }).catch(() => false);
+  if (grantedAll) return true;
+
+  return hasCaptureAccessForOrigin(origin);
+}
+
+function openDashboard(view: 'dashboard' | 'pricing', reason?: string, modal?: 'account'): void {
+  const url = new URL(chrome.runtime.getURL('ui/dashboard/dashboard.html'));
+  if (view !== 'dashboard') url.searchParams.set('view', view);
+  if (modal) url.searchParams.set('modal', modal);
+  if (reason) url.searchParams.set('source', reason);
+  chrome.tabs.create({ url: url.toString() });
+}
 
 // ─── App ──────────────────────────────────────────────────────────────────────
 
@@ -86,7 +116,6 @@ function App(): JSX.Element {
   const [authStatus, setAuthStatus] = useState<AuthStatusPayload | null>(null);
   const cancelDialogRef = useRef<HTMLDivElement | null>(null);
   const keepRecordingButtonRef = useRef<HTMLButtonElement | null>(null);
-  const thumbUrlRef = useRef(new Map<string, string>());
 
   // Live timer while recording
   useEffect(() => {
@@ -135,17 +164,6 @@ function App(): JSX.Element {
     };
   }, [showCancelConfirm, isCanceling]);
 
-  const cleanupThumbUrls = useCallback(() => {
-    for (const url of thumbUrlRef.current.values()) URL.revokeObjectURL(url);
-    thumbUrlRef.current.clear();
-  }, []);
-
-  const buildStepTitle = (step: Step): string => {
-    const base = step.labelOverride?.trim() || step.label.trim();
-    if (!base) return `Click step ${step.index}`;
-    return base.startsWith('Clicked ') ? `Click ${base.slice('Clicked '.length)}` : `Click ${base}`;
-  };
-
   const loadLiveSteps = useCallback(async (sessionId: string) => {
     const [steps, events] = await Promise.all([
       getStepsForSession(sessionId),
@@ -162,8 +180,6 @@ function App(): JSX.Element {
 
     for (const step of recent) {
       const afterEv = step.afterEvidenceEventId ? storedById.get(step.afterEvidenceEventId) : undefined;
-      const beforeEv = step.beforeEvidenceEventId ? storedById.get(step.beforeEvidenceEventId) : undefined;
-
       const startTs = step.ts;
       const endTs = afterEv?.ts ?? (step.ts + 10_000);
       const hasHttp500 = events.some((ev) =>
@@ -180,77 +196,15 @@ function App(): JSX.Element {
         && ev.kind === 'console_error',
       );
 
-      let beforeThumbUrl: string | undefined;
-      if (beforeEv?.blobKey) {
-        const cacheKey = beforeEv.id;
-        const existing = thumbUrlRef.current.get(cacheKey);
-        if (existing) {
-          beforeThumbUrl = existing;
-        } else {
-          const blobRecord = await getBlob(beforeEv.blobKey);
-          if (blobRecord) {
-            const arr = blobRecord.data;
-            const copied = new Uint8Array(new ArrayBuffer(arr.byteLength));
-            copied.set(arr);
-            const blob = new Blob([copied], { type: blobRecord.mimeType });
-            beforeThumbUrl = URL.createObjectURL(blob);
-            thumbUrlRef.current.set(cacheKey, beforeThumbUrl);
-          }
-        }
-      }
-
-      let afterThumbUrl: string | undefined;
-      if (afterEv?.blobKey) {
-        const cacheKey = afterEv.id;
-        const existing = thumbUrlRef.current.get(cacheKey);
-        if (existing) {
-          afterThumbUrl = existing;
-        } else {
-          const blobRecord = await getBlob(afterEv.blobKey);
-          if (blobRecord) {
-            const arr = blobRecord.data;
-            const copied = new Uint8Array(new ArrayBuffer(arr.byteLength));
-            copied.set(arr);
-            const blob = new Blob([copied], { type: blobRecord.mimeType });
-            afterThumbUrl = URL.createObjectURL(blob);
-            thumbUrlRef.current.set(cacheKey, afterThumbUrl);
-          }
-        }
-      }
-
-      const beforeUrl = beforeEv?.pageUrl ?? step.pageUrl;
-      const afterUrl = afterEv?.pageUrl;
-      const transitionBadge = buildTransitionBadge(beforeUrl, afterUrl);
-
       cards.push({
         id: step.id,
         index: step.index,
-        title: buildStepTitle(step),
         ts: step.ts,
-        beforeThumbUrl,
-        afterThumbUrl,
-        hasBefore: Boolean(step.beforeEvidenceEventId),
         hasAfter: Boolean(step.afterEvidenceEventId),
         noAfterNeeded: Boolean(step.noChangeDetected && !step.afterEvidenceEventId),
-        transitionBadge,
         hasHttp500,
         hasConsoleError,
-        note: step.note,
       });
-    }
-
-    // Revoke URLs for evidence events that are no longer referenced by any live step.
-    // Cache keys are evidenceEventIds, so build the keep-set from live steps'
-    // before + after evidence IDs.
-    const keepEvidenceIds = new Set<string>();
-    for (const step of recent) {
-      if (step.beforeEvidenceEventId) keepEvidenceIds.add(step.beforeEvidenceEventId);
-      if (step.afterEvidenceEventId) keepEvidenceIds.add(step.afterEvidenceEventId);
-    }
-    for (const [evidenceId, url] of thumbUrlRef.current.entries()) {
-      if (keepEvidenceIds.has(evidenceId)) continue;
-      URL.revokeObjectURL(url);
-      thumbUrlRef.current.delete(evidenceId);
     }
 
     setLiveSteps(cards);
@@ -301,18 +255,18 @@ function App(): JSX.Element {
         return;
       }
 
-      // No active session — check whether we have permission for the current tab's origin
-      chrome.permissions.contains({ origins: [originToPattern(origin)] }, (has) => {
+      // No active session — check whether we can capture on current tab.
+      void (async () => {
+        const hasAccess = await hasCaptureAccessForOrigin(origin);
         setActiveSessionId(null);
-        cleanupThumbUrls();
         setLiveSteps([]);
-        setState(has ? 'idle' : 'no-permission');
+        setState(hasAccess ? 'idle' : 'no-permission');
         setSessionNotice('');
         setPendingOrigins([]);
         setSessionStartMs(0);
-      });
+      })();
     });
-  }, []);
+  }, [loadLiveSteps]);
 
   useEffect(() => { void refresh(); }, [refresh]);
 
@@ -343,7 +297,7 @@ function App(): JSX.Element {
     };
   }, [refresh]);
 
-  // Live step-feed updates from background.
+  // Live session metrics update from background step events.
   useEffect(() => {
     const onRuntimeMessage = (msg: unknown): void => {
       if (!isRec(msg) || typeof msg['type'] !== 'string') return;
@@ -357,21 +311,21 @@ function App(): JSX.Element {
     return () => chrome.runtime.onMessage.removeListener(onRuntimeMessage);
   }, [activeSessionId, loadLiveSteps]);
 
-  useEffect(() => {
-    return () => cleanupThumbUrls();
-  }, [cleanupThumbUrls]);
 
   const handleAllow = () => {
-    chrome.permissions.request({ origins: [originToPattern(currentOrigin)] }, (granted) => {
+    void (async () => {
+      const granted = await ensureCaptureAccessForOrigin(currentOrigin);
       if (granted) setState('idle');
-    });
+    })();
   };
 
 
   // Grant permission for a new origin found mid-session. chrome.permissions.request()
   // MUST be called from the side panel / popup (user gesture).
   const handleGrantOrigin = (pending: PendingOriginInfo) => {
-    chrome.permissions.request({ origins: [originToPattern(pending.origin)] }, (granted) => {
+    const pattern = originToPattern(pending.origin);
+    if (!pattern) return;
+    chrome.permissions.request({ origins: [pattern] }, (granted) => {
       if (!granted) return;
       chrome.runtime.sendMessage({ type: 'TT_PERMIT_ORIGIN', origin: pending.origin, tabId: pending.tabId });
       setPendingOrigins((prev) => prev.filter((p) => p.origin !== pending.origin));
@@ -386,7 +340,7 @@ function App(): JSX.Element {
       setIsStopping(false);
 
       if (chrome.runtime.lastError) {
-        setSessionNotice('Could not stop recording cleanly. Reload extension and verify run state in dashboard.');
+        setSessionNotice('BusinessFlow could not stop recording cleanly. Reload the extension, then verify run status in the dashboard.');
         return;
       }
 
@@ -398,22 +352,42 @@ function App(): JSX.Element {
       const warnings = Array.isArray(response['warnings'])
         ? (response['warnings'] as unknown[]).filter((item): item is string => typeof item === 'string')
         : [];
+      const cleanupSummary = isRec(response['cleanupSummary']) ? response['cleanupSummary'] : null;
 
       setState('idle');
       setActiveSessionId(null);
       setPendingOrigins([]);
       setLiveSteps([]);
       setCaptureState('idle');
+
+      const cleanupChanged = cleanupSummary
+        && typeof cleanupSummary['updatedSteps'] === 'number'
+        && (cleanupSummary['updatedSteps'] as number) > 0;
+
       if (warnings.length > 0) {
         setSessionNotice(warnings[0] ?? 'Recording stopped with warnings. Review dashboard before sharing.');
+      } else if (cleanupChanged) {
+        setSessionNotice('Recording finalized. Cleaning pass complete — opening dashboard report.');
+      } else {
+        setSessionNotice('Recording finalized. Opening dashboard report…');
       }
+
+      openDashboard('dashboard', 'panel-stop-report');
     });
   };
 
-  const handleManualCapture = () => {
+  const handleManualCapture = async () => {
     if (captureState === 'capturing') return;
     setCaptureState('capturing');
     setSessionNotice('');
+
+    const hasAccess = await ensureCaptureAccessForOrigin(currentOrigin);
+    if (!hasAccess) {
+      setCaptureState('failed');
+      setSessionNotice('BusinessFlow needs site access to capture evidence on this page. Update Site access in Chrome extension settings, then try again.');
+      window.setTimeout(() => setCaptureState('idle'), 1800);
+      return;
+    }
 
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       const tabId = tabs[0]?.id;
@@ -428,9 +402,16 @@ function App(): JSX.Element {
           if (chrome.runtime.lastError || !isRec(response) || response['ok'] !== true) {
             const reason = isRec(response) && typeof response['reason'] === 'string'
               ? response['reason']
-              : 'capture_failed';
+              : '';
+            const humanMessage = reason === 'permission_denied'
+              ? 'BusinessFlow needs site access to capture evidence on this page. Update Site access in Chrome extension settings, then try again.'
+              : reason === 'no_active_tab'
+                ? 'No active tab detected. Focus the page you’re testing and try again.'
+                : reason === 'no_session'
+                  ? 'Recording is not active. Start a recording before capturing evidence.'
+                  : 'Couldn’t capture evidence. Try again in a moment.';
             setCaptureState('failed');
-            setSessionNotice(`Couldn’t capture evidence (${reason}).`);
+            setSessionNotice(humanMessage);
             window.setTimeout(() => setCaptureState('idle'), 1800);
             return;
           }
@@ -500,41 +481,32 @@ function App(): JSX.Element {
     });
   };
 
-  const openSettings = () => chrome.runtime.openOptionsPage();
+  const openMyAccount = () => openDashboard('dashboard', 'panel-header-account', 'account');
 
-  const renderAuthStrip = (): JSX.Element => {
-    const state = authStatus?.state ?? 'checking_access';
-    const title = state === 'signed_out'
-      ? 'Signed out'
-      : state === 'signed_in'
-        ? 'Signed in'
-        : state === 'checking_access'
-          ? 'Checking access'
-          : state === 'access_active'
-            ? 'Access active'
-            : state === 'session_expired'
-              ? 'Session expired'
-              : 'Access unavailable';
+  const stepMetrics = useMemo(() => {
+    const total = liveSteps.length;
+    const settled = liveSteps.filter((step) => step.hasAfter || step.noAfterNeeded).length;
+    const waiting = Math.max(total - settled, 0);
+    const issues = liveSteps.filter((step) => step.hasHttp500 || step.hasConsoleError).length;
+    return { total, settled, waiting, issues };
+  }, [liveSteps]);
 
-    const tone = state === 'access_active'
-      ? 'is-good'
-      : state === 'checking_access' || state === 'signed_in'
-        ? 'is-neutral'
-        : state === 'signed_out'
-          ? 'is-muted'
-          : 'is-warn';
-
-    return (
-      <div class={`account-status-strip ${tone}`} role="status" aria-live="polite">
-        <span class="account-status-strip__dot" aria-hidden="true" />
-        <div class="account-status-strip__copy">
-          <strong>{title}</strong>
-          <span>{authStatus?.message ?? 'Validating entitlement with backend.'}</span>
+  const renderPanelHeader = () => (
+    <div class="tt-header">
+      <div class="tt-brand-lockup" aria-label="BusinessFlow">
+        <img class="tt-brand-icon" src="../logo/Logo.png" alt="" aria-hidden="true" />
+        <div class="tt-brand-copy">
+          <strong>BusinessFlow</strong>
+          <span>QA Recorder</span>
         </div>
-        <span class="account-status-strip__plan">{authStatus?.entitlement?.plan ?? 'n/a'}</span>
       </div>
-    );
-  };
+      <div class="tt-header-actions">
+        <button class="btn-account" onClick={openMyAccount} aria-label="Open my account" title="My account">
+          My account
+        </button>
+      </div>
+    </div>
+  );
 
   if (state === 'loading') {
     return (
@@ -548,13 +520,10 @@ function App(): JSX.Element {
   return (
     <div class="tt-card card">
       {sessionNotice && <p class="err mb" role="status" aria-live="polite">{sessionNotice}</p>}
-      {renderAuthStrip()}
       {/* ── Unsupported page (chrome://, about:) ── */}
       {state === 'unsupported' && (
         <>
-          <div class="tt-header">
-            <img class="tt-brand-icon" src="../logo/Logo.png" alt="BusinessFlow" />
-          </div>
+          {renderPanelHeader()}
           <div class="empty">
             <div class="empty-icon" aria-hidden="true">
               <svg viewBox="0 0 32 32" width="28" height="28" focusable="false">
@@ -571,9 +540,7 @@ function App(): JSX.Element {
       {/* ── No permission for current tab's origin ── */}
       {state === 'no-permission' && (
         <>
-          <div class="tt-header">
-            <img class="tt-brand-icon" src="../logo/Logo.png" alt="BusinessFlow" />
-          </div>
+          {renderPanelHeader()}
           <div class="empty">
             <div class="empty-icon" aria-hidden="true">
               <svg viewBox="0 0 32 32" width="28" height="28" focusable="false">
@@ -600,28 +567,21 @@ function App(): JSX.Element {
       {/* ── Idle: start form ── */}
       {state === 'idle' && (
         <>
-          <div class="tt-header">
-            <div>
-              <img class="tt-brand-wordmark" src="../logo/Brand_Name.png" alt="BusinessFlow" />
-            </div>
-            <div class="tt-header-actions">
-              <button class="btn-icon" onClick={openSettings} aria-label="Open settings" title="Settings">
-                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                  <path d="M19.14 12.94a7.2 7.2 0 0 0 .05-.94 7.2 7.2 0 0 0-.05-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.3 7.3 0 0 0-1.63-.94l-.36-2.54a.5.5 0 0 0-.49-.42h-3.84a.5.5 0 0 0-.49.42l-.36 2.54a7.3 7.3 0 0 0-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.7 8.84a.5.5 0 0 0 .12.64l2.03 1.58a7.2 7.2 0 0 0-.05.94c0 .32.02.63.05.94l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32a.5.5 0 0 0 .6.22l2.39-.96c.5.38 1.05.7 1.63.94l.36 2.54a.5.5 0 0 0 .49.42h3.84a.5.5 0 0 0 .49-.42l.36-2.54c.58-.24 1.13-.56 1.63-.94l2.39.96a.5.5 0 0 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58ZM12 15.5A3.5 3.5 0 1 1 12 8a3.5 3.5 0 0 1 0 7.5Z" fill="currentColor" />
-                </svg>
-              </button>
-            </div>
-          </div>
+          {renderPanelHeader()}
           <div class="recording-status-strip recording-status-strip--idle" role="status" aria-live="polite">
             <span class="recording-status-strip__dot is-idle" aria-hidden="true" />
             <div class="recording-status-strip__copy">
               <strong>Not recording</strong>
-              <span>Set feature + test case, then start when you’re ready.</span>
+              <span>Select a feature and test case, then start recording.</span>
             </div>
             <span class="recording-status-strip__timer">Ready</span>
           </div>
 
-          <StartForm origin={currentOrigin} onStarted={refresh} />
+          <StartForm
+            origin={currentOrigin}
+            authStatus={authStatus}
+            onStarted={refresh}
+          />
         </>
       )}
 
@@ -651,160 +611,106 @@ function App(): JSX.Element {
             </div>
           )}
 
-          <div class="tt-header tt-header--recording">
-            <div>
-              <img class="tt-brand-wordmark" src="../logo/Brand_Name.png" alt="BusinessFlow" />
-            </div>
-            <div class="tt-header-actions">
-              <button class="btn-icon" onClick={openSettings} aria-label="Open settings" title="Settings">
-                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                  <path d="M19.14 12.94a7.2 7.2 0 0 0 .05-.94 7.2 7.2 0 0 0-.05-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.3 7.3 0 0 0-1.63-.94l-.36-2.54a.5.5 0 0 0-.49-.42h-3.84a.5.5 0 0 0-.49.42l-.36 2.54a7.3 7.3 0 0 0-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.7 8.84a.5.5 0 0 0 .12.64l2.03 1.58a7.2 7.2 0 0 0-.05.94c0 .32.02.63.05.94l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32a.5.5 0 0 0 .6.22l2.39-.96c.5.38 1.05.7 1.63.94l.36 2.54a.5.5 0 0 0 .49.42h3.84a.5.5 0 0 0 .49-.42l.36-2.54c.58-.24 1.13-.56 1.63-.94l2.39.96a.5.5 0 0 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58ZM12 15.5A3.5 3.5 0 1 1 12 8a3.5 3.5 0 0 1 0 7.5Z" fill="currentColor" />
-                </svg>
-              </button>
-            </div>
-          </div>
+          {renderPanelHeader()}
 
           <div class={`recording-status-strip ${isStopping || isCanceling ? 'recording-status-strip--stopping' : paused ? 'recording-status-strip--paused' : 'recording-status-strip--active'}`} role="status" aria-live="polite">
             <span class={`recording-status-strip__dot ${isStopping || isCanceling ? 'is-stopping' : paused ? 'is-paused' : 'is-active'}`} aria-hidden="true" />
             <div class="recording-status-strip__copy">
-              <strong>{isStopping || isCanceling ? 'Finishing recording…' : paused ? 'Recording paused' : 'Recording active'}</strong>
-              <span>{isStopping || isCanceling ? 'Saving run data and final evidence.' : paused ? 'Auto-capture is paused until you resume.' : 'Capturing evidence as you test this page.'}</span>
+              <strong>{isStopping || isCanceling ? 'Finalizing recording…' : paused ? 'Recording paused' : 'Recording active'}</strong>
+              <span>{isStopping || isCanceling ? 'Running deferred cleanup and preparing your dashboard report.' : paused ? 'Auto-capture is paused until you resume.' : 'Capturing evidence as you test this page.'}</span>
             </div>
-            <span class="recording-status-strip__timer">{isStopping || isCanceling ? 'Saving…' : elapsed}</span>
+            <span class="recording-status-strip__timer">{isStopping || isCanceling ? 'Finalizing…' : elapsed}</span>
           </div>
 
-          {pendingOrigins.length > 0 && (
-            <div class="pending-block">
-              <div class="pending-title">New site{pendingOrigins.length > 1 ? 's' : ''} found in this run</div>
-              {pendingOrigins.map((p) => (
-                <div key={p.origin} class="pending-row">
-                  <span class="pending-origin">{p.origin}</span>
-                  <button class="pending-btn" onClick={() => handleGrantOrigin(p)}>Allow this site</button>
-                </div>
-              ))}
+          <div class="recording-controls">
+            <button
+              class="rec-capture-btn"
+              onClick={handleManualCapture}
+              disabled={captureState === 'capturing' || isStopping || isCanceling || isPauseToggling}
+              title="Manually capture current evidence as a new step"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path d="M9 4.5c.35-.9 1.2-1.5 2.16-1.5h1.68c.96 0 1.81.6 2.16 1.5l.46 1.17H18A3 3 0 0 1 21 8.67v8.83a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3V8.67a3 3 0 0 1 3-3h2.54L9 4.5Zm3 11.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z" fill="currentColor" />
+              </svg>
+              <span>{captureState === 'capturing' ? 'Capturing evidence…' : 'Capture Evidence'}</span>
+            </button>
+            <p class="rec-capture-support">Save a critical UI state instantly when you need explicit proof.</p>
+            <div class={`rec-capture-feedback is-${captureState}`} role="status" aria-live="polite">
+              {captureState === 'done'
+                ? 'Evidence captured and attached to this recording run.'
+                : captureState === 'failed'
+                  ? 'Capture failed. Check site access and try again.'
+                  : 'Automatic capture is active. Use this for moments you want guaranteed in the report.'}
             </div>
-          )}
 
-          <div class="step-feed">
-            <div class="step-feed__head">Live evidence</div>
-            <div class="step-feed__list">
-              {liveSteps.length === 0 && (
-                <div class="step-feed__empty">Interact with the page to capture your first step.</div>
-              )}
-              {liveSteps.map((step) => (
-                <div key={step.id} class="step-card card">
-                  <div class="step-card__row">
-                    <div class="step-card__title">{step.title}</div>
-                    <div class="step-card__index">#{step.index}</div>
-                  </div>
-                  <div class="step-card__meta">
-                    {step.hasAfter
-                      ? 'After screenshot saved'
-                      : step.noAfterNeeded
-                        ? 'No visible page transition — after screenshot skipped'
-                        : 'Waiting for stable after screenshot…'}
-                  </div>
-                  <div class="step-card__footer">
-                    {step.hasBefore && step.hasAfter ? (
-                      <div class="step-card__pair" aria-label="Before and after evidence">
-                        <div class="step-card__frame">
-                          <div class="step-card__frame-label">[ BEFORE ]</div>
-                          {step.beforeThumbUrl
-                            ? <img src={step.beforeThumbUrl} alt="Before evidence thumbnail" class="step-card__thumb screenshot-thumb" />
-                            : <div class="step-card__thumb step-card__thumb--empty">No image</div>}
-                        </div>
-                        <div class="step-card__pair-arrow" aria-hidden="true"></div>
-                        <div class="step-card__frame">
-                          <div class="step-card__frame-label">[ AFTER ]</div>
-                          {step.afterThumbUrl
-                            ? <img src={step.afterThumbUrl} alt="After evidence thumbnail" class="step-card__thumb screenshot-thumb" />
-                            : <div class="step-card__thumb step-card__thumb--empty">No image</div>}
-                        </div>
-                      </div>
-                    ) : (
-                      <div class="step-card__frame step-card__frame--single">
-                        <div class="step-card__frame-label">[ BEFORE ]</div>
-                        {step.beforeThumbUrl
-                          ? <img src={step.beforeThumbUrl} alt="Before evidence thumbnail" class="step-card__thumb screenshot-thumb" />
-                          : <div class="step-card__thumb step-card__thumb--empty">No image</div>}
-                      </div>
-                    )}
-                    <div class="step-card__badges">
-                      {step.hasHttp500 && <span class="step-badge step-badge--err badge badge-danger">HTTP 500</span>}
-                      {step.hasConsoleError && <span class="step-badge step-badge--warn badge badge-danger">Console error</span>}
-                    </div>
-                  </div>
-                  {step.hasBefore && step.hasAfter && step.transitionBadge && (
-                    <div class="step-transition-badge badge">{step.transitionBadge}</div>
-                  )}
-                  {step.note && <div class="step-card__saved-note"> {step.note}</div>}
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div class="recording-controls card">
-            <div class="recording-controls__head">
-              <div class="recording-controls__title">Manual evidence capture</div>
-              <div class="recording-controls__hint">Use Capture Evidence when you want to intentionally save proof for this exact moment.</div>
-            </div>
-            <div class="recording-controls__actions recording-controls__actions--stacked">
+            <div class="rec-secondary-row">
               <button
-                class="btn-pill btn-pill--capture btn btn-primary btn-pill--big"
-                onClick={handleManualCapture}
-                disabled={captureState === 'capturing' || isStopping || isCanceling || isPauseToggling}
-                title="Manually capture current evidence as a new step"
+                class="rec-secondary-btn"
+                onClick={handlePauseResume}
+                disabled={isPauseToggling || isStopping || isCanceling}
               >
-                <span class="recording-controls__btn-content">
-                  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                    <path d="M9 4.5c.35-.9 1.2-1.5 2.16-1.5h1.68c.96 0 1.81.6 2.16 1.5l.46 1.17H18A3 3 0 0 1 21 8.67v8.83a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3V8.67a3 3 0 0 1 3-3h2.54L9 4.5Zm3 11.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z" fill="currentColor" />
-                  </svg>
-                  <span>{captureState === 'capturing' ? 'Capturing evidence...' : 'Capture Evidence'}</span>
-                </span>
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  {paused
+                    ? <path d="M8 5.5v13l10-6.5-10-6.5Z" fill="currentColor" />
+                    : <path d="M7 5h3v14H7V5Zm7 0h3v14h-3V5Z" fill="currentColor" />}
+                </svg>
+                <span>{isPauseToggling ? (paused ? 'Resuming…' : 'Pausing…') : (paused ? 'Resume recording' : 'Pause recording')}</span>
               </button>
-              <div class={`recording-controls__capture-feedback ${captureState}`} role="status" aria-live="polite">
-                {captureState === 'done'
-                  ? 'Evidence captured and saved to this run.'
-                  : captureState === 'failed'
-                    ? 'Capture failed. Try again in a moment.'
-                    : 'BusinessFlow auto-captures while you test. This adds a manual evidence step.'}
-              </div>
-              <div class="recording-controls__secondary">
-                <button class="btn-pill btn-pill--secondary btn" onClick={handlePauseResume} disabled={isPauseToggling || isStopping || isCanceling}>
-                  <span class="recording-controls__btn-content">
-                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                      {paused
-                        ? <path d="M8 5.5v13l10-6.5-10-6.5Z" fill="currentColor" />
-                        : <path d="M7 5h3v14H7V5Zm7 0h3v14h-3V5Z" fill="currentColor" />}
-                    </svg>
-                    <span>{isPauseToggling ? (paused ? 'Resuming...' : 'Pausing...') : (paused ? 'Resume' : 'Pause')}</span>
-                  </span>
-                </button>
-                <button class="btn-pill btn-pill--stop btn" onClick={handleStop} disabled={isStopping || isCanceling || isPauseToggling}>
-                  <span class="recording-controls__btn-content">
-                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                      <path d="M7 7h10v10H7V7Z" fill="currentColor" />
-                    </svg>
-                    <span>{isStopping ? 'Stopping...' : 'Stop recording'}</span>
-                  </span>
-                </button>
-                <button class="btn-pill btn-pill--danger btn" onClick={handleCancelRecording} disabled={isStopping || isCanceling || isPauseToggling}>
-                  <span class="recording-controls__btn-content">
-                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                      <path d="M6 7h12l-1 13H7L6 7Zm3-3h6l1 2H8l1-2Z" fill="currentColor" />
-                    </svg>
-                    <span>{isCanceling ? 'Canceling...' : 'Cancel recording'}</span>
-                  </span>
-                </button>
-              </div>
+              <button
+                class="rec-secondary-btn rec-secondary-btn--danger"
+                onClick={handleStop}
+                disabled={isStopping || isCanceling || isPauseToggling}
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <path d="M7 7h10v10H7V7Z" fill="currentColor" />
+                </svg>
+                <span>{isStopping ? 'Finalizing…' : 'Stop recording'}</span>
+              </button>
             </div>
+
+            <button
+              class="rec-cancel-link"
+              onClick={handleCancelRecording}
+              disabled={isStopping || isCanceling || isPauseToggling}
+            >
+              {isCanceling ? 'Canceling…' : 'Cancel recording'}
+            </button>
           </div>
 
-          <p class="helper-text">
-            {paused
-              ? 'Recording is paused. Resume when you want auto-capture back on.'
-              : 'Recording is active. Interactions on the page are captured automatically.'}
-          </p>
+          <section class="recording-meta" aria-label="Recording session status">
+            <div class="recording-meta__grid">
+              <div class="recording-meta__item">
+                <span class="recording-meta__label">Steps captured</span>
+                <strong>{stepMetrics.total}</strong>
+              </div>
+              <div class="recording-meta__item">
+                <span class="recording-meta__label">Steps stabilized</span>
+                <strong>{stepMetrics.settled}</strong>
+              </div>
+              <div class="recording-meta__item">
+                <span class="recording-meta__label">Stabilizing</span>
+                <strong>{stepMetrics.waiting}</strong>
+              </div>
+              <div class="recording-meta__item">
+                <span class="recording-meta__label">Issues flagged</span>
+                <strong>{stepMetrics.issues}</strong>
+              </div>
+            </div>
+
+            {pendingOrigins.length > 0 ? (
+              <div class="recording-meta__pending" role="status" aria-live="polite">
+                <div class="recording-meta__pending-title">Site access needed for {pendingOrigins.length} new {pendingOrigins.length === 1 ? 'site' : 'sites'}.</div>
+                {pendingOrigins.map((p) => (
+                  <div key={p.origin} class="recording-meta__pending-row">
+                    <span>{p.origin}</span>
+                    <button class="recording-meta__allow" onClick={() => handleGrantOrigin(p)}>Allow</button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div class="recording-meta__foot">BusinessFlow is currently scoped to: <span>{currentOrigin || 'this tab'}</span></div>
+            )}
+          </section>
         </>
       )}
     </div>
@@ -983,7 +889,13 @@ function SearchCreateCombobox({
   );
 }
 
-function StartForm({ origin, onStarted }: { origin: string; onStarted: () => void }): JSX.Element {
+interface StartFormProps {
+  origin: string;
+  authStatus: AuthStatusPayload | null;
+  onStarted: () => void;
+}
+
+function StartForm({ origin, authStatus, onStarted }: StartFormProps): JSX.Element {
   const [featureName, setFeatureName] = useState('');
   const [testCaseName, setTestCaseName] = useState('');
   const [error, setError] = useState('');
@@ -1071,6 +983,8 @@ function StartForm({ origin, onStarted }: { origin: string; onStarted: () => voi
     chrome.tabs.create({ url: chrome.runtime.getURL('ui/dashboard/dashboard.html') });
   };
 
+  const ensureCapturePermissions = async (): Promise<boolean> => ensureCaptureAccessForOrigin(origin);
+
   const performSessionStart = async (): Promise<void> => {
     if (starting) return;
     const feature = featureName.trim();
@@ -1078,6 +992,13 @@ function StartForm({ origin, onStarted }: { origin: string; onStarted: () => voi
 
     setStarting(true);
     setError('');
+
+    const permissionGranted = await ensureCapturePermissions();
+    if (!permissionGranted) {
+      setStarting(false);
+      setError('BusinessFlow needs site access to record this page. Update Site access in Chrome extension settings, then try again.');
+      return;
+    }
 
     chrome.runtime.sendMessage({
       type: 'TT_SESSION_START',
@@ -1097,7 +1018,7 @@ function StartForm({ origin, onStarted }: { origin: string; onStarted: () => voi
       if (resp['type'] === 'TT_SESSION_START_ERR') {
         const errText = String(resp['error'] ?? 'Failed');
         setError(errText === 'Permission denied'
-          ? 'Permission denied — grant site access to BusinessFlow and try again.'
+          ? 'BusinessFlow needs site access to record this page. Update Site access in Chrome extension settings, then try again.'
           : errText);
         return;
       }
@@ -1111,11 +1032,11 @@ function StartForm({ origin, onStarted }: { origin: string; onStarted: () => voi
     const testCase = testCaseName.trim();
 
     if (!feature) {
-      setError('Feature is required');
+      setError('Feature name is required.');
       return;
     }
     if (!testCase) {
-      setError('Test case name is required');
+      setError('Test case name is required.');
       return;
     }
 
@@ -1153,7 +1074,7 @@ function StartForm({ origin, onStarted }: { origin: string; onStarted: () => voi
                   void performSessionStart();
                 }}
               >
-                {starting ? 'Starting…' : 'Continue and replace oldest run'}
+                {starting ? 'Starting…' : 'Start and replace oldest run'}
               </button>
             </div>
           </div>

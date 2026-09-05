@@ -264,8 +264,9 @@ describe('clipboard evidence projection', () => {
     expect(rendered.html).toContain('height="300"');
     expect(rendered.html).toContain('<strong>Step 1</strong>');
     expect(rendered.html).not.toContain('>BEFORE<');
-    expect(rendered.text).toContain('Findings:');
-    expect(rendered.text).toContain('image attached in rich paste when supported');
+    expect(rendered.text).toContain('## Findings');
+    expect(rendered.markdown).toContain('## Relevant screenshots');
+    expect(rendered.text).toContain('embedded in rich paste when destination supports HTML images');
   });
 
   it('uses bounded width with auto height when intrinsic screenshot size is unavailable', () => {

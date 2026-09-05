@@ -164,6 +164,16 @@ export async function startSession(params: StartSessionParams): Promise<Session>
   return session;
 }
 
+async function unregisterNetworkInterceptor(): Promise<void> {
+  try {
+    await chrome.scripting.unregisterContentScripts({ ids: ['tt-network-interceptor'] });
+  } catch (error) {
+    const msg = String(error ?? '');
+    if (msg.includes('Nonexistent script ID tt-network-interceptor')) return;
+    console.warn(error);
+  }
+}
+
 export async function stopSession(sessionId: string, tabId: number): Promise<void> {
   const session = await getSession(sessionId);
   if (!session) return;
@@ -189,7 +199,7 @@ export async function stopSession(sessionId: string, tabId: number): Promise<voi
   chrome.tabs.create({ url: dashboardUrl }).catch(() => {});
 
   await clearAllState();
-  await chrome.scripting.unregisterContentScripts({ ids: ['tt-network-interceptor'] }).catch(console.warn);
+  await unregisterNetworkInterceptor();
 }
 
 export async function pauseSession(sessionId: string, tabId: number): Promise<void> {

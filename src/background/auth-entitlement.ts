@@ -51,6 +51,11 @@ interface ApiEnvelope<T> {
   };
 }
 
+interface ForgotPasswordResponse {
+  accepted: boolean;
+  message: string;
+}
+
 interface ExtensionLoginResponse {
   user: {
     userId: string;
@@ -278,6 +283,26 @@ export function createAuthEntitlementManager(deps: ManagerDependencies) {
     return signIn(trimmedEmail, password);
   }
 
+  async function requestPasswordReset(email: string): Promise<ForgotPasswordResponse> {
+    const trimmedEmail = safeTrim(email);
+    if (!trimmedEmail) {
+      throw new Error('Email is required');
+    }
+
+    const shape = await getStorage();
+    const response = await deps.fetcher.send(`${shape.config.backendBaseUrl}/api/v1/auth/forgot-password`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        email: trimmedEmail,
+      }),
+    });
+
+    return parseApiResponse<ForgotPasswordResponse>(response);
+  }
+
   async function signOut(): Promise<AuthStatusPayload> {
     const shape = await getStorage();
     if (shape.session?.token) {
@@ -451,6 +476,7 @@ export function createAuthEntitlementManager(deps: ManagerDependencies) {
     setBackendBaseUrl,
     signIn,
     signUp,
+    requestPasswordReset,
     signOut,
     refreshEntitlement,
     getStatus,

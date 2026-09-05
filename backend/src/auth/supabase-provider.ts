@@ -185,4 +185,24 @@ export class SupabaseAuthProvider implements AuthProvider {
       },
     });
   }
+
+  async requestPasswordReset(email: string): Promise<void> {
+    const response = await fetch(`${this.supabaseUrl}/auth/v1/recover`, {
+      method: 'POST',
+      headers: {
+        apikey: this.supabaseAnonKey,
+        authorization: `Bearer ${this.supabaseAnonKey}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ email }),
+    });
+
+    if (!response.ok) {
+      throw new ApiError({
+        code: 'AUTH_PASSWORD_RESET_FAILED',
+        status: 502,
+        message: 'Password reset request could not be processed',
+      });
+    }
+  }
 }

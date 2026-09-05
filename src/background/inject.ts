@@ -4,6 +4,28 @@
 
 import { originToPattern } from '../core/url.js';
 
+const BROAD_HOST_PATTERNS = ['<all_urls>'];
+
+async function hasOriginPermission(patterns: string[]): Promise<boolean> {
+  if (!patterns.length) return false;
+  const hasBroadAccess = await chrome.permissions.contains({ origins: BROAD_HOST_PATTERNS }).catch(() => false);
+  if (hasBroadAccess) return true;
+  return chrome.permissions.contains({ origins: patterns }).catch(() => false);
+}
+
+async function canScriptTab(tabId: number): Promise<boolean> {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'ISOLATED',
+      func: () => true,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function getRequestableOriginPatterns(origins: string[]): string[] {
   const out = new Set<string>();
   for (const origin of origins) {
@@ -42,32 +64,43 @@ export async function injectIntoMatchingTabs(scopeOrigins: string[]): Promise<vo
 }
 
 export async function injectIntoTab(tabId: number): Promise<void> {
-  try {
-    // Isolated world script (click capture, DOM observation, indicator)
-    // Inject into all frames so interactions inside iframes are captured.
-    // UI overlays remain top-frame only via guards in isolated.ts.
-    await chrome.scripting.executeScript({
-      target: { tabId, allFrames: true },
-      files: ['content/isolated.js'],
-    });
+  let lastError: unknown;
 
-    // Main world script (console.error, window.onerror)
-    // Inject into all frames so we capture iframe-level runtime/page errors too.
-    // Keep isolated.js top-frame only to avoid duplicate overlays/panels.
-    await chrome.scripting.executeScript({
-      target: { tabId, allFrames: true },
-      files: ['content/main-world.js'],
-      world: 'MAIN',
-    });
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      // Isolated world script (click capture, DOM observation, indicator)
+      // Inject into all frames so interactions inside iframes are captured.
+      // UI overlays remain top-frame only via guards in isolated.ts.
+      await chrome.scripting.executeScript({
+        target: { tabId, allFrames: true },
+        files: ['content/isolated.js'],
+      });
 
-    // Indicator CSS
-    await chrome.scripting.insertCSS({
-      target: { tabId },
-      files: ['content/indicator.css'],
-    });
-  } catch (err) {
-    console.debug('[TestTrace] inject failed for tab', tabId, err);
+      // Main world script (console.error, window.onerror)
+      // Inject into all frames so we capture iframe-level runtime/page errors too.
+      // Keep isolated.js top-frame only to avoid duplicate overlays/panels.
+      await chrome.scripting.executeScript({
+        target: { tabId, allFrames: true },
+        files: ['content/main-world.js'],
+        world: 'MAIN',
+      });
+
+      // Indicator CSS
+      await chrome.scripting.insertCSS({
+        target: { tabId },
+        files: ['content/indicator.css'],
+      });
+      return;
+    } catch (err) {
+      lastError = err;
+      if (attempt < 2) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 200));
+        continue;
+      }
+    }
   }
+
+  console.debug('[TestTrace] inject failed for tab', tabId, lastError);
 }
 
 export async function deactivateInAllTabs(scopeOrigins: string[]): Promise<void> {
@@ -90,16 +123,22 @@ export async function deactivateInAllTabs(scopeOrigins: string[]): Promise<void>
   }
 }
 
+export async function hasCaptureAccessForOrigins(tabId: number | undefined, origins: string[]): Promise<boolean> {
+  const patterns = getRequestableOriginPatterns(origins);
+  if (await hasOriginPermission(patterns)) return true;
+  if (!tabId || tabId <= 0) return false;
+  return canScriptTab(tabId);
+}
+
 export async function requestOptionalPermission(origins: string[]): Promise<boolean> {
+  if (await hasOriginPermission(BROAD_HOST_PATTERNS)) return true;
+
   const patterns = getRequestableOriginPatterns(origins);
   if (!patterns.length) return false;
 
-  const hasAlready = await chrome.permissions.contains({ origins: patterns }).catch(() => false);
+  const hasAlready = await hasOriginPermission(patterns);
   if (hasAlready) return true;
 
   return chrome.permissions.request({ origins: patterns }).catch(() => false);
 }
 
-export function getSessionScopePermissionPatterns(origins: string[]): string[] {
-  return getRequestableOriginPatterns(origins);
-}

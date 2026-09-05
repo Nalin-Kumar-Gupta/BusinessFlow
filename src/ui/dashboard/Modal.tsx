@@ -8,6 +8,7 @@ export interface ModalProps {
   inputValue?: string;
   onConfirm: (value: string) => void | Promise<void>;
   onCancel: () => void;
+  confirmLabel?: string;
   isDanger?: boolean;
 }
 
@@ -20,15 +21,28 @@ export function Modal({
   inputValue = '',
   onConfirm,
   onCancel,
+  confirmLabel = 'Confirm',
   isDanger = false,
 }: ModalProps): JSX.Element {
   const [value, setValue] = useState(inputValue);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const dialogIdRef = useRef(`modal-${Math.random().toString(36).slice(2, 9)}`);
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const confirmRef = useRef<HTMLButtonElement | null>(null);
 
-  const submit = (): void => { void onConfirm(value); };
+  const submit = (): void => {
+    if (isSubmitting) return;
+    setIsSubmitting(true);
+    Promise.resolve(onConfirm(value)).finally(() => {
+      setIsSubmitting(false);
+    });
+  };
+
+  const handleCancel = (): void => {
+    if (isSubmitting) return;
+    onCancel();
+  };
 
   useEffect(() => {
     setValue(inputValue);
@@ -42,7 +56,7 @@ export function Modal({
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') {
         event.preventDefault();
-        onCancel();
+        handleCancel();
         return;
       }
       if (event.key === 'Enter' && !(event.target instanceof HTMLTextAreaElement)) {
@@ -79,7 +93,7 @@ export function Modal({
   }, [onCancel]);
 
   return (
-    <div class="modal-overlay" onClick={onCancel}>
+    <div class="modal-overlay" onClick={handleCancel}>
       <div
         class="modal-content"
         ref={dialogRef}
@@ -99,6 +113,7 @@ export function Modal({
             aria-label={inputPlaceholder}
             placeholder={inputPlaceholder}
             value={value}
+            disabled={isSubmitting}
             onInput={(event) => setValue((event.target as HTMLInputElement).value)}
             onKeyDown={(event) => {
               if (event.key === 'Enter') {
@@ -109,9 +124,9 @@ export function Modal({
           />
         )}
         <div class="modal-actions">
-          <button class="btn btn-outline" onClick={onCancel}>Cancel</button>
-          <button ref={confirmRef} class={`btn ${isDanger ? 'btn-danger' : 'btn-primary'}`} onClick={submit}>
-            Confirm
+          <button class="btn btn-outline" onClick={handleCancel} disabled={isSubmitting}>Cancel</button>
+          <button ref={confirmRef} class={`btn ${isDanger ? 'btn-danger' : 'btn-primary'}`} onClick={submit} disabled={isSubmitting}>
+            {isSubmitting ? 'Working…' : confirmLabel}
           </button>
         </div>
       </div>

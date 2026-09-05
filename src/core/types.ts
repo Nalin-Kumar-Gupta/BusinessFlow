@@ -570,6 +570,24 @@ export interface StepBug {
   pin?: StepPin;
 }
 
+export type StepAfterDecisionReason =
+  | 'already_after_stored'
+  | 'url_changed'
+  | 'nav_confirmed'
+  | 'dom_shift'
+  | 'same_url_no_change'
+  | 'insufficient_signal';
+
+export type StepLifecycleState =
+  | 'CREATED'
+  | 'BEFORE_QUEUED'
+  | 'BEFORE_STORED'
+  | 'BEFORE_FAILED'
+  | 'AFTER_QUEUED'
+  | 'AFTER_STORED'
+  | 'AFTER_SKIPPED'
+  | 'AFTER_CANCELED';
+
 export interface Step {
   id: string;
   sessionId: string;
@@ -591,6 +609,12 @@ export interface Step {
   bugs?: StepBug[];
   /** Non-empty when the tester overrides `label` in the report. */
   labelOverride?: string;
+  /** Monotonic click generation on this tab when the step was opened. */
+  interactionGeneration?: number;
+  /** Deterministic lifecycle state for capture orchestration. */
+  stepState?: StepLifecycleState;
+  /** Reason code from the latest after-frame decision. */
+  afterDecisionReason?: StepAfterDecisionReason;
   /** URL of the page when the step started. */
   pageUrl?: string;
   /** Click event ids grouped into this step (>=1; multiple if coalesced). */

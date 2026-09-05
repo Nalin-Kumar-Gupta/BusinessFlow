@@ -6,6 +6,10 @@ export interface AuthCredentialInput {
   password: string;
 }
 
+export interface AuthEmailInput {
+  email: string;
+}
+
 function normalizeEmail(raw: unknown): string {
   if (typeof raw !== 'string') {
     throw new ApiError({
@@ -57,5 +61,12 @@ export function validateCredentialRequest(input: unknown): AuthCredentialInput {
   return {
     email: normalizeEmail(input['email']),
     password: normalizePassword(input['password']),
+  };
+}
+
+export function validateEmailRequest(input: unknown): AuthEmailInput {
+  assertObject(input);
+  return {
+    email: normalizeEmail(input['email']),
   };
 }

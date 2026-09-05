@@ -17,4 +17,5 @@ export interface AuthProvider {
   refresh: (refreshToken: string) => Promise<ProviderAuthResult>;
   getUser: (accessToken: string) => Promise<ProviderUserProfile>;
   logout: (accessToken: string) => Promise<void>;
+  requestPasswordReset: (email: string) => Promise<void>;
 }

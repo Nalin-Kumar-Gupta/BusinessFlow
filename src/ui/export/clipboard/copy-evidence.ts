@@ -13,6 +13,7 @@ export interface CopyEvidenceResult {
   readonly mode: 'rich' | 'text';
   readonly imageCount: number;
   readonly missingImageCount: number;
+  readonly includesMarkdown: boolean;
 }
 
 export async function copySessionEvidence(bundle: SessionExportBundle): Promise<CopyEvidenceResult> {
@@ -55,9 +56,11 @@ async function copyEvidenceFromBundles(
 
   if (typeof ClipboardItem !== 'undefined' && typeof clipboard.write === 'function') {
     const basePayload: Record<string, Blob> = {
-      'text/plain': new Blob([rendered.text], { type: 'text/plain' }),
+      'text/plain': new Blob([rendered.markdown], { type: 'text/plain' }),
       'text/html': new Blob([rendered.html], { type: 'text/html' }),
     };
+
+    basePayload['text/markdown'] = new Blob([rendered.markdown], { type: 'text/markdown' });
 
     try {
       await clipboard.write([new ClipboardItem(basePayload)]);
@@ -65,16 +68,26 @@ async function copyEvidenceFromBundles(
         mode: 'rich',
         imageCount: rendered.resolvedImageCount,
         missingImageCount: rendered.missingImageCount,
+        includesMarkdown: true,
       };
     } catch {
       // Fall through to text-only.
     }
   }
 
-  await clipboard.writeText(rendered.text);
+  try {
+    await clipboard.writeText(rendered.markdown);
+  } catch (error) {
+    const message = error instanceof Error ? error.message.toLowerCase() : '';
+    if (message.includes('denied') || message.includes('permission')) {
+      throw new Error('Clipboard permission blocked. Allow clipboard access and try again.');
+    }
+    throw new Error('Clipboard write failed. Try again and keep the dashboard tab focused.');
+  }
   return {
     mode: 'text',
     imageCount: rendered.resolvedImageCount,
     missingImageCount: rendered.missingImageCount,
+    includesMarkdown: true,
   };
 }

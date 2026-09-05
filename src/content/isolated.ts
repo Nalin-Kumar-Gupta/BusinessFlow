@@ -313,26 +313,28 @@ import { getIndicatorHost, mountIndicator, setIndicatorMode, unmountIndicator } 
   // Ask the SW "is there an active session for my origin?" so the recorder
   // re-appears automatically after F5, cross-tab navigation, OAuth redirects -
   // without waiting for handleTabUpdated to push a message.
-  //
-  // Runs once per content-script injection (the __tt_injected__ guard above
-  // ensures it only fires once per page load).
 
-  void safeRuntimeSendMessage({ type: 'TT_QUERY_SESSION', origin: location.origin })
-    .then((resp: unknown) => {
-      if (!isRec(resp)) {
-        return;
+  const QUERY_SESSION_RETRY_DELAYS_MS = [0, 250, 600, 1200];
+
+  async function bootstrapSessionState(): Promise<void> {
+    for (const delayMs of QUERY_SESSION_RETRY_DELAYS_MS) {
+      if (delayMs > 0) {
+        await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
       }
+
+      const resp = await safeRuntimeSendMessage({ type: 'TT_QUERY_SESSION', origin: location.origin });
+      if (!isRec(resp)) continue;
+
       const sid = resp['sessionId'];
       if (typeof sid === 'string' && sid) {
         _sessionId = sid;
         activate();
-      } else {
       }
       // Note: the `showReady` branch is intentionally NOT handled here.
       // The Chrome side panel is the sole "ready to test" surface now.
-    })
-    .catch(() => {
-      // SW not yet awake or extension context invalidated - handleTabUpdated
-      // will send TT_CONTENT_ACTIVATE when the SW warms back up.
-    });
+      return;
+    }
+  }
+
+  void bootstrapSessionState();
 })();

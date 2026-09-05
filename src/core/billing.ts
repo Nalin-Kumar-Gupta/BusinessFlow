@@ -5,6 +5,7 @@ export interface BillingCatalogPrice {
   planKey: string;
   priceId: string;
   trialDays: number;
+  formattedPrice: string | null;
 }
 
 export interface BillingCatalogPlan {

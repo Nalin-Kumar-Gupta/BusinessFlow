@@ -9,14 +9,14 @@ describe('privacy defaults', () => {
     expect(DEFAULT_SETTINGS.captureNetworkErrorBodies).toBe(false);
   });
 
-  it('uses optional site permissions instead of static all_urls host permission', () => {
+  it('uses persistent host permission for local-only capture reliability', () => {
     const manifestPath = join(process.cwd(), 'src', 'manifest.json');
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
       host_permissions?: string[];
       optional_host_permissions?: string[];
     };
 
-    expect(manifest.host_permissions ?? []).toEqual([]);
-    expect(manifest.optional_host_permissions ?? []).toEqual(['http://*/*', 'https://*/*']);
+    expect(manifest.host_permissions ?? []).toEqual(['<all_urls>']);
+    expect(manifest.optional_host_permissions ?? []).toEqual([]);
   });
 });

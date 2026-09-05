@@ -1,6 +1,6 @@
 import { attachNavListeners } from './nav-observer.js';
 import { attachNetListeners } from './net-observer.js';
-import { injectIntoMatchingTabs, requestOptionalPermission, getSessionScopePermissionPatterns } from './inject.js';
+import { injectIntoMatchingTabs, requestOptionalPermission, hasCaptureAccessForOrigins } from './inject.js';
 
 import { requestCapture } from './screenshot.js';
 import { startSession } from './session.js';
@@ -25,8 +25,9 @@ export async function handleSessionStartFromPage(
   const origins = (msg['scopeOrigins'] as string[] | undefined) ?? [];
   if (!origins.length) { sendResponse({ type: 'TT_SESSION_START_ERR', error: 'No origins provided' }); return; }
 
-  const patterns = getSessionScopePermissionPatterns(origins);
-  const hasPerm = await chrome.permissions.contains({ origins: patterns }).catch(() => false);
+  const tabId = sender.tab?.id ?? -1;
+
+  const hasPerm = await hasCaptureAccessForOrigins(tabId, origins);
   if (!hasPerm) {
     const granted = await requestOptionalPermission(origins).catch(() => false);
     if (!granted) {
@@ -35,17 +36,15 @@ export async function handleSessionStartFromPage(
     }
   }
 
-  const hasAllPerms = await chrome.permissions.contains({ origins: patterns }).catch(() => false);
+  const hasAllPerms = await hasCaptureAccessForOrigins(tabId, origins);
   if (!hasAllPerms) {
-    console.error('[TestTrace] session_start_from_page permission verification failed', { origins, hasAllPerms });
+    console.error('[TestTrace] session_start_from_page permission verification failed', { origins, hasAllPerms, tabId });
     sendResponse({ type: 'TT_SESSION_START_ERR', error: 'Permission denied' });
     return;
   }
 
   attachNetListeners();
   attachNavListeners();
-
-  const tabId = sender.tab?.id ?? -1;
 
   const session = await startSession({
     testCaseName: String(msg['testCaseName'] ?? 'Untitled'),

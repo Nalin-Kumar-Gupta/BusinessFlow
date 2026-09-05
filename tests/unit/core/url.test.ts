@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { redactUrl, safeOrigin, safePath, urlMatchesScope } from '../../../src/core/url.js';
+import { redactUrl, safeOrigin, safePath, urlMatchesScope, originToPattern } from '../../../src/core/url.js';
 
 describe('redactUrl', () => {
   it('strips userinfo credentials', () => {
@@ -40,6 +40,20 @@ describe('safePath', () => {
 
   it('returns raw string for invalid URL', () => {
     expect(safePath('not-a-url')).toBe('not-a-url');
+  });
+});
+
+describe('originToPattern', () => {
+  it('normalizes a standard https origin', () => {
+    expect(originToPattern('https://example.com')).toBe('https://example.com/*');
+  });
+
+  it('drops port from localhost origins so permission checks stay valid', () => {
+    expect(originToPattern('http://localhost:5173')).toBe('http://localhost/*');
+  });
+
+  it('returns empty string for unsupported schemes', () => {
+    expect(originToPattern('file:///tmp/test.html')).toBe('');
   });
 });
 

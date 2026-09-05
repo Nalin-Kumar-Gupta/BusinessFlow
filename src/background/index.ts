@@ -23,13 +23,14 @@ import {
   handleSessionStartFromPage as handleSessionStartFromPageImpl,
   handlePermitOrigin as handlePermitOriginImpl,
 } from './session-flow.js';
-import { injectIntoMatchingTabs, injectIntoTab, deactivateInAllTabs, requestOptionalPermission, getSessionScopePermissionPatterns } from './inject.js';
+import { injectIntoMatchingTabs, injectIntoTab, deactivateInAllTabs, requestOptionalPermission, hasCaptureAccessForOrigins } from './inject.js';
 
 import { redactUrl, urlMatchesScope } from '../core/url.js';
 import { newStepId, newEventId } from '../core/ids.js';
 import { createLifecycleLock } from './lifecycle-lock.js';
-import { putStep } from '../storage/db.js';
+import { putStep, getStepsForSession } from '../storage/db.js';
 import { summarizeRecordingIntegrity, hasEvidenceIntegrityRisk } from '../core/reliability.js';
+import { runDeferredStepCleanup } from './deferred-cleanup.js';
 
 // ─── Synchronous top-level listener registration ──────────────────────────────
 // NOTHING above this line that could fail/throw.
@@ -42,6 +43,8 @@ chrome.tabs.onUpdated.addListener(handleTabUpdated);
 chrome.tabs.onCreated.addListener(handleTabCreated);    // multi-tab: detect new tabs opened during session
 chrome.tabs.onRemoved.addListener(handleTabRemoved);    // multi-tab: clean up closed tabs
 chrome.tabs.onActivated.addListener(handleTabActivated); // capture when user switches TO a session tab
+
+const BROAD_HOST_PATTERNS = ['<all_urls>'];
 
 // Tabs that loaded in background; capture when user activates.
 const pendingCaptureTabs = new Set<number>();
@@ -177,6 +180,10 @@ function handleMessage(
 
     case 'TT_AUTH_SIGN_UP':
       void handleAuthSignUp(message as Record<string, unknown>, sendResponse);
+      return true;
+
+    case 'TT_AUTH_FORGOT_PASSWORD':
+      void handleAuthForgotPassword(message as Record<string, unknown>, sendResponse);
       return true;
 
     case 'TT_AUTH_SIGN_OUT':
@@ -388,9 +395,12 @@ async function handleTabUpdated(
       }
 
       const pattern = originToPattern(origin);
-      const hasPerm = pattern ? await new Promise<boolean>((res) =>
+      const hasBroadAccess = await new Promise<boolean>((res) =>
+        chrome.permissions.contains({ origins: BROAD_HOST_PATTERNS }, res),
+      );
+      const hasPerm = hasBroadAccess || (pattern ? await new Promise<boolean>((res) =>
         chrome.permissions.contains({ origins: [pattern] }, res),
-      ) : false;
+      ) : false);
 
       if (hasPerm) {
         // ── Full capture: inject content script, DOM observation ─────────────
@@ -440,9 +450,12 @@ async function handleTabUpdated(
 
   // ── No active session (or not a session tab): show "Ready to test" ─────────
   const pattern = originToPattern(origin);
-  const hasPerm = pattern ? await new Promise<boolean>((res) =>
+  const hasBroadAccess = await new Promise<boolean>((res) =>
+    chrome.permissions.contains({ origins: BROAD_HOST_PATTERNS }, res),
+  );
+  const hasPerm = hasBroadAccess || (pattern ? await new Promise<boolean>((res) =>
     chrome.permissions.contains({ origins: [pattern] }, res),
-  ) : false;
+  ) : false);
   if (!hasPerm) return;
 
   await injectIntoTab(tabId).catch(() => {});
@@ -457,13 +470,53 @@ async function handleTabUpdated(
 async function handleContentReady(sender: chrome.runtime.MessageSender): Promise<void> {
   const sessionId = await getActiveSessionId();
   if (!sessionId) return;
+
   const tabId = sender.tab?.id;
-  if (!tabId || !await isSessionTab(tabId)) return;
+  if (!tabId) return;
+
+  // Self-heal: after SW restart + page reload, TT_CONTENT_READY can arrive
+  // before this tab is rehydrated into the session roster.
+  let inSession = await isSessionTab(tabId);
+  if (!inSession) {
+    const tab = sender.tab;
+    const url = tab?.url ?? '';
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      const { extractOrigin } = await import('../core/url.js');
+      const origin = extractOrigin(url);
+      const scopeOrigins = await getScopeOrigins();
+      if (origin && scopeOrigins.includes(origin) && tab) {
+        await addSessionTab({
+          tabId,
+          windowId: tab.windowId ?? 0,
+          origin,
+          addedAt: Date.now(),
+        });
+        inSession = true;
+      }
+    }
+  }
+
+  if (!inSession) return;
 
   // Remove from pending set if it was queued there
   pendingCaptureTabs.delete(tabId);
 
-  void requestCapture({ sessionId, tabId, trigger: 'session_start', priority: 'high' });
+  const firstAttempt = await requestCaptureWithResult({
+    sessionId,
+    tabId,
+    trigger: 'session_start',
+    priority: 'high',
+  });
+
+  if (firstAttempt.ok) return;
+
+  // Reload/connect races can briefly leave the tab "not active" or still
+  // repainting. Retry once after a short settle window.
+  if (firstAttempt.reason === 'tab_not_active' || firstAttempt.reason === 'capture_failed') {
+    setTimeout(() => {
+      void requestCapture({ sessionId, tabId, trigger: 'session_start', priority: 'high' });
+    }, 700);
+  }
 }
 
 // Query session on each page load so panel survives refresh/navigation.
@@ -503,9 +556,12 @@ async function handleQuerySession(
 
   // No active session — check if origin is registered (show "ready to test")
   const pattern = originToPattern(origin);
-  const hasPerm = pattern ? await new Promise<boolean>((res) =>
+  const hasBroadAccess = await new Promise<boolean>((res) =>
+    chrome.permissions.contains({ origins: BROAD_HOST_PATTERNS }, res),
+  );
+  const hasPerm = hasBroadAccess || (pattern ? await new Promise<boolean>((res) =>
     chrome.permissions.contains({ origins: [pattern] }, res),
-  ) : false;
+  ) : false);
   sendResponse(hasPerm ? { showReady: true } : null);
 }
 
@@ -622,6 +678,19 @@ async function handleAuthSignUp(
     const password = typeof msg['password'] === 'string' ? msg['password'] : '';
     const status = await authEntitlementManager.signUp(email, password);
     sendResponse({ ok: true, status });
+  } catch (error) {
+    sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  }
+}
+
+async function handleAuthForgotPassword(
+  msg: Record<string, unknown>,
+  sendResponse: (r?: unknown) => void,
+): Promise<void> {
+  try {
+    const email = typeof msg['email'] === 'string' ? msg['email'] : '';
+    const result = await authEntitlementManager.requestPasswordReset(email);
+    sendResponse({ ok: true, data: result });
   } catch (error) {
     sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
   }
@@ -929,6 +998,9 @@ async function handleSessionStart(
   const origins = (msg['scopeOrigins'] as string[] | undefined) ?? [];
   if (!origins.length) { sendResponse({ type: 'TT_SESSION_START_ERR', error: 'No origins provided' }); return; }
 
+  const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const tabId = activeTab?.id ?? -1;
+
   // Permission is requested in the popup (user gesture required — can't do it here).
   // The popup sets permissionAlreadyGranted:true when it succeeds.
   // If somehow called without that flag, attempt it anyway (fallback).
@@ -937,10 +1009,9 @@ async function handleSessionStart(
     if (!granted) { sendResponse({ type: 'TT_SESSION_START_ERR', error: 'Permission denied' }); return; }
   }
 
-  const patterns = getSessionScopePermissionPatterns(origins);
-  const hasAllPerms = await chrome.permissions.contains({ origins: patterns }).catch(() => false);
+  const hasAllPerms = await hasCaptureAccessForOrigins(tabId, origins);
   if (!hasAllPerms) {
-    console.error('[TestTrace] session_start permission verification failed', { origins, hasAllPerms });
+    console.error('[TestTrace] session_start permission verification failed', { origins, hasAllPerms, tabId });
     sendResponse({ type: 'TT_SESSION_START_ERR', error: 'Permission denied' });
     return;
   }
@@ -948,9 +1019,6 @@ async function handleSessionStart(
   // Attach webRequest/nav listeners now that host permissions are granted.
   attachNetListeners();
   attachNavListeners();
-
-  const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  const tabId = activeTab?.id ?? -1;
 
   const { getSettings } = await import('../storage/settings.js');
   const settings = await getSettings();
@@ -1047,6 +1115,14 @@ async function handleSessionStop(sendResponse: (r?: unknown) => void): Promise<v
   await stopSession(sessionId, tabId);
   await deactivateInAllTabs(origins);
 
+  const cleanupSummary = await runDeferredStepCleanup(sessionId);
+  if (cleanupSummary.updatedSteps > 0) {
+    console.log('[TestTrace] deferred-stop-cleanup complete', {
+      sessionId,
+      ...cleanupSummary,
+    });
+  }
+
   const tabs = await chrome.tabs.query({}).catch(() => [] as chrome.tabs.Tab[]);
   for (const t of tabs) {
     if (!t.id) continue;
@@ -1084,6 +1160,7 @@ async function handleSessionStop(sendResponse: (r?: unknown) => void): Promise<v
     type: 'TT_SESSION_STOPPED',
     sessionId,
     integrity,
+    cleanupSummary,
     warnings,
     ...(finalCapture ? { finalCapture } : {}),
   });
@@ -1123,6 +1200,33 @@ async function handleCaptureEvidence(
   const tabId = typeof fromSender === 'number' ? fromSender : fromMessage;
   if (tabId < 0) { sendResponse({ ok: false }); return; }
   const startedAt = Date.now();
+
+  const isContentOrigin = Boolean(sender.tab?.id);
+  if (isContentOrigin) {
+    const steps = await getStepsForSession(sessionId);
+    const latestStep = [...steps]
+      .sort((a, b) => b.index - a.index)
+      .find((s) => s.tabId === tabId && Boolean(s.beforeEvidenceEventId) && !s.afterEvidenceEventId);
+
+    if (latestStep) {
+      const attached = await requestCaptureWithResult({
+        sessionId,
+        tabId,
+        trigger: 'manual',
+        note: msg['note'] as string | undefined,
+        priority: 'high',
+        stepId: latestStep.id,
+        stepFrame: 'after',
+        pageUrl: sender.tab?.url,
+      });
+
+      if (attached.ok) {
+        sendResponse({ ok: true, stepId: latestStep.id, evidenceEventId: attached.evidenceEventId, attachedToExistingStep: true });
+        return;
+      }
+    }
+  }
+
   const index = await nextStepIndex(sessionId);
   const step: Step = {
     id: newStepId(),
@@ -1148,7 +1252,7 @@ async function handleCaptureEvidence(
     ts: step.ts,
   }).catch(() => {});
 
-  const captureResult = await requestCaptureWithResult({
+  let captureResult = await requestCaptureWithResult({
     sessionId,
     tabId,
     trigger: 'manual',
@@ -1158,6 +1262,20 @@ async function handleCaptureEvidence(
     stepFrame: 'before',
     pageUrl: sender.tab?.url,
   });
+
+  if (!captureResult.ok && (captureResult.reason === 'tab_not_active' || captureResult.reason === 'capture_failed')) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 500));
+    captureResult = await requestCaptureWithResult({
+      sessionId,
+      tabId,
+      trigger: 'manual',
+      note: msg['note'] as string | undefined,
+      priority: 'high',
+      stepId: step.id,
+      stepFrame: 'before',
+      pageUrl: sender.tab?.url,
+    });
+  }
 
   if (!captureResult.ok) {
     sendResponse({

@@ -86,6 +86,54 @@ describe('authentication flow', () => {
     expect(body.error.code).toBe('AUTH_INVALID_CREDENTIALS');
   });
 
+  it('forgot password returns generic success and does not leak user existence', async () => {
+    const provider = new MockAuthProvider();
+    const repository = new InMemoryAuthRepository();
+    const { app, env } = createAuthTestApp(provider, repository);
+
+    await app.fetch(
+      new Request('https://api.businessflow.local/api/v1/auth/signup', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ email: 'known@businessflow.dev', password: 'Password123!' }),
+      }),
+      env,
+    );
+
+    const knownResponse = await app.fetch(
+      new Request('https://api.businessflow.local/api/v1/auth/forgot-password', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ email: 'known@businessflow.dev' }),
+      }),
+      env,
+    );
+
+    const unknownResponse = await app.fetch(
+      new Request('https://api.businessflow.local/api/v1/auth/forgot-password', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ email: 'unknown@businessflow.dev' }),
+      }),
+      env,
+    );
+
+    expect(knownResponse.status).toBe(200);
+    expect(unknownResponse.status).toBe(200);
+
+    const knownBody = await knownResponse.json() as { data: { accepted: boolean; message: string } };
+    const unknownBody = await unknownResponse.json() as { data: { accepted: boolean; message: string } };
+
+    expect(knownBody.data.accepted).toBe(true);
+    expect(unknownBody.data.accepted).toBe(true);
+    expect(knownBody.data.message).toContain('If that email exists');
+    expect(unknownBody.data.message).toBe(knownBody.data.message);
+    expect(provider.getPasswordResetRequests()).toEqual([
+      'known@businessflow.dev',
+      'unknown@businessflow.dev',
+    ]);
+  });
+
   it('rate limits repeated login abuse attempts', async () => {
     const provider = new MockAuthProvider();
     const repository = new InMemoryAuthRepository();

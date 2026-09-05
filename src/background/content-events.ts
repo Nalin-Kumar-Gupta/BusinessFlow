@@ -6,6 +6,12 @@ import { incrementCounter, nextStepIndex } from './session.js';
 
 
 import { requestCapture } from './screenshot.js';
+import { getInFlightRequestCount } from './net-observer.js';
+import {
+  evaluateAfterCaptureDecision,
+  markAfterQueued,
+  normalizeUrlForCompare,
+} from './after-capture-policy.js';
 
 const KNOWN_CONTENT_EVENT_KINDS = new Set([
   'user_click',
@@ -92,23 +98,49 @@ function asSafeResources(value: unknown): ResourceSummary[] {
   });
 }
 
-const clickToStep = new Map<string, { stepId: string; sessionId: string; tabId: number; clickTs: number }>();
+const clickToStep = new Map<string, {
+  stepId: string;
+  sessionId: string;
+  tabId: number;
+  clickTs: number;
+  generation: number;
+}>();
+const pendingAfterWatchdogs = new Map<string, number>();
 const CLICK_TO_STEP_TTL_MS = 30_000;
 const STEP_NOTE_MAX_LEN = 1000;
+const AFTER_WATCHDOG_DELAY_MS = 1800;
+const AFTER_NETWORK_QUIET_MS = 260;
+const AFTER_NETWORK_MAX_WAIT_MS = 1400;
+const AFTER_NETWORK_POLL_MS = 80;
 
 // ─── Cross-module state for nav-aware after-frame (Option A) ───────────────
 // nav-observer.ts reads these to decide whether an onBeforeNavigate fired
 // within the click's causal window, and to mark a step as awaiting nav.
 const lastClickTsByTab = new Map<number, number>();
 const activeStepByTab = new Map<number, string>();
+const interactionGenerationByTab = new Map<number, number>();
 const pendingNavForStep = new Set<string>();
 // Last time we saw a dom_change from a given tab — used by nav-observer to
 // detect "page has rendered and stabilized" instead of relying on
 // onCompleted, which fires way too early for SPAs like Workday.
 const lastDomChangeAtByTab = new Map<number, number>();
 
-export function getClickContextForTab(tabId: number): { clickTs?: number; stepId?: string } {
-  return { clickTs: lastClickTsByTab.get(tabId), stepId: activeStepByTab.get(tabId) };
+export function getClickContextForTab(tabId: number): { clickTs?: number; stepId?: string; generation?: number } {
+  return {
+    clickTs: lastClickTsByTab.get(tabId),
+    stepId: activeStepByTab.get(tabId),
+    generation: interactionGenerationByTab.get(tabId),
+  };
+}
+
+export function getInteractionGeneration(tabId: number): number {
+  return interactionGenerationByTab.get(tabId) ?? 0;
+}
+
+export function isActiveStepForTab(tabId: number, stepId: string, generation?: number): boolean {
+  if (activeStepByTab.get(tabId) !== stepId) return false;
+  if (generation === undefined) return true;
+  return interactionGenerationByTab.get(tabId) === generation;
 }
 
 export function getLastDomChangeAt(tabId: number): number | undefined {
@@ -132,6 +164,7 @@ export function clearStepNavPending(stepId: string): void {
 export function cleanupTabState(tabId: number): void {
   lastClickTsByTab.delete(tabId);
   activeStepByTab.delete(tabId);
+  interactionGenerationByTab.delete(tabId);
   lastDomChangeAtByTab.delete(tabId);
 }
 
@@ -163,53 +196,129 @@ export function isScriptableUrl(url: string | undefined | null): boolean {
   return lower.startsWith('http://') || lower.startsWith('https://');
 }
 
-function normalizeUrlForCompare(url: string | undefined): string | undefined {
-  if (!url) return undefined;
+async function getLiveTabUrl(tabId: number): Promise<string | undefined> {
   try {
-    return new URL(url).href;
+    const tab = await chrome.tabs.get(tabId);
+    return tab.url ?? tab.pendingUrl;
   } catch {
-    return url.trim() || undefined;
+    return undefined;
   }
 }
 
-export async function skipAfterCaptureIfSameUrl(
+function hasStrictUrlDelta(beforeUrl: string | undefined, afterUrl: string | undefined): boolean {
+  const before = normalizeUrlForCompare(beforeUrl);
+  const after = normalizeUrlForCompare(afterUrl);
+  return Boolean(before && after && before !== after);
+}
+
+async function waitForNetworkQuietOnTab(tabId: number): Promise<{ quiet: boolean; waitedMs: number }> {
+  const started = Date.now();
+  let zeroSince: number | null = null;
+
+  while (Date.now() - started < AFTER_NETWORK_MAX_WAIT_MS) {
+    const inFlight = getInFlightRequestCount(tabId);
+    if (inFlight === 0) {
+      zeroSince ??= Date.now();
+      if (Date.now() - zeroSince >= AFTER_NETWORK_QUIET_MS) {
+        return { quiet: true, waitedMs: Date.now() - started };
+      }
+    } else {
+      zeroSince = null;
+    }
+    await new Promise<void>((r) => setTimeout(r, AFTER_NETWORK_POLL_MS));
+  }
+
+  return { quiet: false, waitedMs: Date.now() - started };
+}
+
+function scheduleLateAfterCaptureRecheck(
   sessionId: string,
   stepId: string,
   tabId: number,
-  currentUrl: string | undefined,
-  hasDomChangeSignal = false,
-): Promise<boolean> {
-  const step = await getStep(stepId);
-  if (!step) return false;
+  generation: number,
+): void {
+  setTimeout(() => {
+    void (async () => {
+      if (!isActiveStepForTab(tabId, stepId, generation)) return;
+      if (isStepAwaitingNav(stepId)) return;
 
-  const beforeUrl = normalizeUrlForCompare(step.pageUrl);
-  const nowUrl = normalizeUrlForCompare(currentUrl);
-  if (!beforeUrl || !nowUrl || beforeUrl !== nowUrl) return false;
+      const step = await getStep(stepId);
+      if (!step || step.afterEvidenceEventId) return;
 
-  // Same URL is not the same as "no state change": a click can open a modal,
-  // expand an accordion, add a row, or surface a validation error without
-  // navigating. The content script tracks whether the DOM meaningfully
-  // shifted after the click; when it did, capture the after-frame anyway.
-  if (hasDomChangeSignal) return false;
+      const liveUrl = await getLiveTabUrl(tabId);
+      if (!hasStrictUrlDelta(step.pageUrl, liveUrl)) return;
 
-  const updated: Step = {
-    ...step,
-    noChangeDetected: true,
-    afterEvidenceEventId: undefined,
-  };
-  await putStep(updated);
+      console.log('[TestTrace] user_action_stable: late URL delta detected, queueing after-frame', {
+        tabId,
+        stepId,
+        beforeUrl: step.pageUrl,
+        liveUrl,
+      });
 
-  chrome.runtime.sendMessage({
-    type: 'TT_STEP_UPDATED',
-    sessionId,
-    stepId,
-    tabId,
-    phase: 'after_skipped_same_url',
-    beforeUrl,
-    currentUrl: nowUrl,
-  }).catch(() => {});
+      void requestCapture({
+        sessionId,
+        tabId,
+        trigger: 'user_action_after',
+        stepId,
+        stepFrame: 'after',
+        priority: 'normal',
+        pageUrl: liveUrl,
+        note: 'after_settle:url_changed_late_recheck',
+      });
+      await markAfterQueued(stepId, 'url_changed');
+    })();
+  }, 450);
+}
 
-  return true;
+function scheduleStepAfterWatchdog(
+  sessionId: string,
+  stepId: string,
+  tabId: number,
+  generation: number,
+): void {
+  const existing = pendingAfterWatchdogs.get(stepId);
+  if (existing) clearTimeout(existing);
+
+  const handle = setTimeout(() => {
+    pendingAfterWatchdogs.delete(stepId);
+    void (async () => {
+      if (!isActiveStepForTab(tabId, stepId, generation)) return;
+      if (isStepAwaitingNav(stepId)) return;
+
+      const step = await getStep(stepId);
+      if (!step || step.afterEvidenceEventId) return;
+
+      const liveUrl = await getLiveTabUrl(tabId);
+      const decision = await evaluateAfterCaptureDecision(sessionId, stepId, tabId, liveUrl, {
+        navConfirmed: false,
+        hasDomChangeSignal: false,
+      });
+      if (!decision.shouldCapture) return;
+
+      console.log('[TestTrace] after-watchdog: URL delta with missing after, queueing capture', {
+        sessionId,
+        stepId,
+        tabId,
+        beforeUrl: step.pageUrl,
+        liveUrl,
+        reason: decision.reason,
+      });
+
+      void requestCapture({
+        sessionId,
+        tabId,
+        trigger: 'user_action_after',
+        stepId,
+        stepFrame: 'after',
+        priority: 'normal',
+        pageUrl: liveUrl,
+        note: `after_settle:${decision.reason}_watchdog_fallback`,
+      });
+      await markAfterQueued(stepId, decision.reason);
+    })();
+  }, AFTER_WATCHDOG_DELAY_MS) as unknown as number;
+
+  pendingAfterWatchdogs.set(stepId, handle);
 }
 
 function cleanupClickToStep(now: number): void {
@@ -304,6 +413,8 @@ export async function handleContentEvent(
 
     // Open a new step for this click.
     const index = await nextStepIndex(sessionId);
+    const interactionGeneration = (interactionGenerationByTab.get(tabId) ?? 0) + 1;
+    interactionGenerationByTab.set(tabId, interactionGeneration);
     const step: Step = {
       id: newStepId(),
       sessionId,
@@ -313,6 +424,8 @@ export async function handleContentEvent(
       seq,
       label: buildStepLabel(semanticLabel, accessibleName, clickEvent.tagName),
       semanticLabel,
+      interactionGeneration,
+      stepState: 'BEFORE_QUEUED',
       pageUrl: clickEvent.pageUrl,
       clickEventIds: [clickEvent.id],
       elementRect,
@@ -345,12 +458,14 @@ export async function handleContentEvent(
         sessionId,
         tabId,
         clickTs: clickEvent.ts,
+        generation: interactionGeneration,
       });
     }
 
     // Register for nav-aware after-frame (Option A).
     lastClickTsByTab.set(tabId, clickEvent.ts);
     activeStepByTab.set(tabId, step.id);
+    scheduleStepAfterWatchdog(sessionId, step.id, tabId, interactionGeneration);
 
     console.log('[TestTrace] requesting before-frame capture', {
       sessionId,
@@ -359,7 +474,8 @@ export async function handleContentEvent(
       triggerEventId: clickEvent.id,
     });
 
-    // "Before" frame for the step.
+    // "Before" frame for the step. Fired from earliest interaction phase
+    // (pointerdown/mousedown) so we freeze pre-transition UI as soon as possible.
     void requestCapture({
       sessionId,
       tabId,
@@ -367,7 +483,8 @@ export async function handleContentEvent(
       triggerEventId: clickEvent.id,
       stepId: step.id,
       stepFrame: 'before',
-      priority: 'normal',
+      priority: 'high',
+      explicitTabTarget: true,
       pageUrl: clickEvent.pageUrl,
     });
     return;
@@ -389,6 +506,14 @@ export async function handleContentEvent(
     const linked = clickToStep.get(clickCorrelationId);
     if (!linked || linked.sessionId !== sessionId) return;
     clickToStep.delete(clickCorrelationId);
+
+    if (!isActiveStepForTab(linked.tabId, linked.stepId, linked.generation)) {
+      console.log('[TestTrace] user_action_stable skipped — stale step superseded by newer click', {
+        tabId: linked.tabId,
+        staleStepId: linked.stepId,
+      });
+      return;
+    }
 
     chrome.runtime.sendMessage({
       type: 'TT_STEP_UPDATED',
@@ -416,28 +541,42 @@ export async function handleContentEvent(
       return;
     }
 
-    const currentUrl = typeof event['pageUrl'] === 'string'
+    const hintedUrl = typeof event['pageUrl'] === 'string'
       ? event['pageUrl'] as string
       : sender.tab?.url;
+    const liveUrl = await getLiveTabUrl(linked.tabId);
+    const effectiveUrl = liveUrl ?? hintedUrl;
     const majorShiftResets = typeof event['majorShiftResets'] === 'number'
       ? event['majorShiftResets'] as number
       : 0;
-    const skipped = await skipAfterCaptureIfSameUrl(
+
+    const decision = await evaluateAfterCaptureDecision(
       sessionId,
       linked.stepId,
       linked.tabId,
-      currentUrl,
-      majorShiftResets >= 1,
+      effectiveUrl,
+      { hasDomChangeSignal: majorShiftResets >= 1, navConfirmed: false },
     );
-    if (skipped) {
-      console.log('[TestTrace] user_action_stable: after-frame skipped (same URL as before)', {
-        stepId: linked.stepId,
-        tabId: linked.tabId,
-        url: currentUrl,
-      });
+
+    if (!decision.shouldCapture) {
+      if (decision.reason === 'same_url_no_change') {
+        console.log('[TestTrace] user_action_stable: after-frame skipped (same URL as before)', {
+          stepId: linked.stepId,
+          tabId: linked.tabId,
+          url: effectiveUrl,
+          reason: decision.reason,
+        });
+        scheduleLateAfterCaptureRecheck(
+          sessionId,
+          linked.stepId,
+          linked.tabId,
+          linked.generation,
+        );
+      }
       return;
     }
 
+    const networkQuiet = await waitForNetworkQuietOnTab(linked.tabId);
     void requestCapture({
       sessionId,
       tabId: linked.tabId,
@@ -445,9 +584,11 @@ export async function handleContentEvent(
       stepId: linked.stepId,
       stepFrame: 'after',
       priority: 'normal',
-      pageUrl: currentUrl,
-      note: 'Post-click stabilized state',
+      pageUrl: effectiveUrl,
+      note: `after_settle:${decision.reason} networkQuiet:${networkQuiet.quiet ? 'yes' : 'timeout'} waitMs:${networkQuiet.waitedMs}`,
     });
+
+    await markAfterQueued(linked.stepId, decision.reason);
     return;
   }
 

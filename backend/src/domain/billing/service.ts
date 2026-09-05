@@ -41,6 +41,10 @@ function resolveSubscriptionIds(subscriptions: BillingSubscriptionRecord[]): str
     .filter((value): value is string => typeof value === 'string' && value.length > 0);
 }
 
+function uniquePriceIds(priceMap: Record<string, string>): string[] {
+  return [...new Set(Object.values(priceMap).filter((priceId) => typeof priceId === 'string' && priceId.length > 0))];
+}
+
 /**
  * BusinessFlow explicit policy:
  * - active/trialing => paid access granted
@@ -54,7 +58,23 @@ export class BillingService {
     private readonly options: BillingServiceOptions,
   ) {}
 
-  getCatalog(detectedCountryCode: string | null): BillingCatalogResult {
+  async getCatalog(detectedCountryCode: string | null): Promise<BillingCatalogResult> {
+    const formattedPriceById = new Map<string, string | null>();
+    const priceIds = uniquePriceIds(this.options.priceMap);
+    await Promise.allSettled(
+      priceIds.map(async (priceId) => {
+        const formatted = await this.paddle.readFormattedPrice(priceId, detectedCountryCode);
+        formattedPriceById.set(priceId, formatted);
+      }),
+    );
+
+    const toCatalogPrice = (planKey: string): BillingCatalogResult['plans'][number]['prices']['monthly'] => ({
+      planKey,
+      priceId: this.options.priceMap[planKey] ?? '',
+      trialDays: 7,
+      formattedPrice: formattedPriceById.get(this.options.priceMap[planKey] ?? '') ?? null,
+    });
+
     const plans: BillingCatalogResult['plans'] = [];
 
     if (this.options.priceMap['starter-monthly'] && this.options.priceMap['starter-yearly']) {
@@ -62,16 +82,8 @@ export class BillingService {
         tier: 'starter',
         productId: this.options.productMap['starter'] ?? null,
         prices: {
-          monthly: {
-            planKey: 'starter-monthly',
-            priceId: this.options.priceMap['starter-monthly'] ?? '',
-            trialDays: 7,
-          },
-          yearly: {
-            planKey: 'starter-yearly',
-            priceId: this.options.priceMap['starter-yearly'] ?? '',
-            trialDays: 7,
-          },
+          monthly: toCatalogPrice('starter-monthly'),
+          yearly: toCatalogPrice('starter-yearly'),
         },
       });
     }
@@ -81,16 +93,8 @@ export class BillingService {
         tier: 'pro',
         productId: this.options.productMap['pro'] ?? null,
         prices: {
-          monthly: {
-            planKey: 'pro-monthly',
-            priceId: this.options.priceMap['pro-monthly'] ?? '',
-            trialDays: 7,
-          },
-          yearly: {
-            planKey: 'pro-yearly',
-            priceId: this.options.priceMap['pro-yearly'] ?? '',
-            trialDays: 7,
-          },
+          monthly: toCatalogPrice('pro-monthly'),
+          yearly: toCatalogPrice('pro-yearly'),
         },
       });
     }
@@ -100,16 +104,8 @@ export class BillingService {
         tier: 'advanced',
         productId: this.options.productMap['advanced'] ?? null,
         prices: {
-          monthly: {
-            planKey: 'advanced-monthly',
-            priceId: this.options.priceMap['advanced-monthly'] ?? '',
-            trialDays: 7,
-          },
-          yearly: {
-            planKey: 'advanced-yearly',
-            priceId: this.options.priceMap['advanced-yearly'] ?? '',
-            trialDays: 7,
-          },
+          monthly: toCatalogPrice('advanced-monthly'),
+          yearly: toCatalogPrice('advanced-yearly'),
         },
       });
     }

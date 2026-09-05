@@ -22,6 +22,7 @@ interface MockAuthState {
   usersByEmail: Map<string, { providerUserId: string; password: string; email: string }>;
   accessTokens: Map<string, { providerUserId: string; email: string; expiresAt: number }>;
   refreshTokens: Map<string, { providerUserId: string; email: string }>;
+  resetRequests: string[];
   forceInvalidCredentials: boolean;
   forceUserValidationFailure: boolean;
 }
@@ -35,6 +36,7 @@ export class MockAuthProvider implements AuthProvider {
     usersByEmail: new Map(),
     accessTokens: new Map(),
     refreshTokens: new Map(),
+    resetRequests: [],
     forceInvalidCredentials: false,
     forceUserValidationFailure: false,
   };
@@ -45,6 +47,10 @@ export class MockAuthProvider implements AuthProvider {
 
   setForceUserValidationFailure(enabled: boolean): void {
     this.state.forceUserValidationFailure = enabled;
+  }
+
+  getPasswordResetRequests(): string[] {
+    return [...this.state.resetRequests];
   }
 
   issueBearerForTest(providerUserId: string, email: string): string {
@@ -88,6 +94,10 @@ export class MockAuthProvider implements AuthProvider {
 
   async logout(accessToken: string): Promise<void> {
     this.state.accessTokens.delete(accessToken);
+  }
+
+  async requestPasswordReset(email: string): Promise<void> {
+    this.state.resetRequests.push(email);
   }
 
   private issueTokens(providerUserId: string, email: string): ProviderAuthResult {
@@ -205,6 +215,12 @@ export class MockPaddleClient implements PaddleClient {
       sessionId: `cps_${crypto.randomUUID()}`,
       portalUrl: `https://sandbox-customer-portal.paddle.com/session/${crypto.randomUUID()}`,
     };
+  }
+
+  async readFormattedPrice(priceId: string, _countryCode: string | null): Promise<string | null> {
+    if (priceId.includes('yearly')) return '$400';
+    if (priceId.includes('monthly')) return '$40';
+    return null;
   }
 }
 

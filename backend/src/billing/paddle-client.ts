@@ -22,6 +22,7 @@ export interface CustomerPortalSession {
 export interface PaddleClient {
   createCheckout: (input: CreateCheckoutInput) => Promise<CheckoutSession>;
   createCustomerPortalSession: (customerId: string, subscriptionIds: string[]) => Promise<CustomerPortalSession>;
+  readFormattedPrice: (priceId: string, countryCode: string | null) => Promise<string | null>;
 }
 
 interface PaddleTransactionResponse {
@@ -33,11 +34,63 @@ interface PaddleTransactionResponse {
   };
 }
 
+interface PaddlePriceResponse {
+  data?: {
+    unitPrice?: {
+      amount?: string;
+      currencyCode?: string;
+    };
+    unit_price?: {
+      amount?: string;
+      currency_code?: string;
+    };
+    currencyCode?: string;
+    currency_code?: string;
+    formattedPrice?: string;
+    formatted_price?: string;
+    formattedUnitPrice?: string;
+    formatted_unit_price?: string;
+  };
+}
+
 interface PaddleErrorResponse {
   error?: {
     detail?: string;
     type?: string;
   };
+}
+
+function toFormattedPrice(payload: PaddlePriceResponse): string | null {
+  const data = payload.data;
+  if (!data) return null;
+
+  const direct = [
+    data.formattedPrice,
+    data.formatted_price,
+    data.formattedUnitPrice,
+    data.formatted_unit_price,
+  ];
+  for (const candidate of direct) {
+    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+  }
+
+  const amount = data.unitPrice?.amount ?? data.unit_price?.amount;
+  const currency = data.unitPrice?.currencyCode ?? data.unit_price?.currency_code ?? data.currencyCode ?? data.currency_code;
+  if (!amount || !currency) return null;
+
+  const numeric = Number.parseFloat(amount);
+  if (!Number.isFinite(numeric)) return null;
+
+  try {
+    return new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency,
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 2,
+    }).format(numeric / 100);
+  } catch {
+    return null;
+  }
 }
 
 export class PaddleApiClient implements PaddleClient {
@@ -112,5 +165,25 @@ export class PaddleApiClient implements PaddleClient {
         message: error instanceof Error ? error.message : 'Failed to create customer portal session',
       });
     }
+  }
+
+  async readFormattedPrice(priceId: string, countryCode: string | null): Promise<string | null> {
+    const params = new URLSearchParams();
+    if (countryCode && countryCode.trim().length > 0) {
+      params.set('address[country_code]', countryCode.trim().toUpperCase());
+    }
+    const query = params.toString();
+    const url = `${this.baseUrl}/prices/${encodeURIComponent(priceId)}${query ? `?${query}` : ''}`;
+
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        authorization: `Bearer ${this.apiKey}`,
+      },
+    });
+
+    if (!response.ok) return null;
+    const payload = await response.json().catch(() => ({} as PaddlePriceResponse));
+    return toFormattedPrice(payload);
   }
 }
